@@ -695,7 +695,7 @@ if st.session_state.pdf_bytes is not None:
                             q_num = result_item.get('Question Number', 'N/A'); question_text = result_item.get('Question', 'N/A')
                             # Use a more unique key including category to avoid clashes if same Q# appears unexpectedly elsewhere
                             expander_key = f"exp_{category}_{q_num}_{index}"
-                            with st.expander(f"**Q{q_num}:** {question_text}", key=expander_key):
+                            with st.expander(f"**Q{q_num}:** {question_text}"):
                                 st.markdown(f"**Answer:**"); st.markdown(f"> {result_item.get('Answer', 'N/A')}"); st.markdown("---")
                                 evidence_list = result_item.get('Evidence', [])
                                 if evidence_list:
