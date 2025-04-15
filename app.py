@@ -41,7 +41,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 2. Configuration & Setup ---
-MODEL_NAME = "gemini-1.5-pro-preview-0514" # Using 1.5 Pro as requested in previous iterations. Check availability/access.
+MODEL_NAME = "gemini-2.5-pro-preview-03-25" 
 # MODEL_NAME = "gemini-1.5-flash-preview-0514" # Consider Flash for faster testing if Pro is slow
 MAX_VALIDATION_RETRIES = 1
 RETRY_DELAY_SECONDS = 3
