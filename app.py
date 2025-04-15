@@ -557,7 +557,7 @@ def render_pdf_page_to_image(_pdf_bytes, page_number, highlight_instances=None, 
                     if isinstance(inst, (fitz.Rect, fitz.Quad)):
                         highlight = page.add_highlight_annot(inst)
                         if highlight: # Check if annotation was added successfully
-                            highlight.set_colors(stroke=fitz.utils.getColor("red"), fill=fitz.utils.getColor("yellow"))
+                            highlight.set_colors(stroke=fitz.utils.getColor("yellow"))
                             highlight.set_opacity(0.4)
                             highlight.update()
                             highlight_applied_count += 1
@@ -1210,7 +1210,7 @@ if st.session_state.pdf_bytes is not None:
 
             # --- Display Image & Final Status ---
             if image_bytes:
-                st.image(image_bytes, caption=f"Page {current_display_page} - View", use_column_width='always')
+                st.image(image_bytes, caption=f"Page {current_display_page} - View", use_container_width=True)
                 final_status = render_status_override if render_status_override else render_status
 
                 # Update status placeholder *unless* it's already showing multi-match info
