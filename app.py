@@ -721,7 +721,7 @@ if st.session_state.pdf_bytes is not None:
                                         if st.session_state.show_wording_states.get(f"toggle_wording_{base_key}", False): st.text_area(f"AI Extracted Wording for '{clause_ref}':", value=clause_wording, height=150, disabled=True, key=f"wording_area_{base_key}")
                                         st.markdown("---") # Separator after each evidence item
                                 else: st.markdown("**Evidence:** None provided.")
-                                st.markdown("---", key=f"sep_just_{category}_{q_num}_{index}"); st.markdown("**Answer Justification:**") # Unique key for separator
+                                st.markdown("---"); st.markdown("**Answer Justification:**")
                                 justification_text = result_item.get('Answer Justification', ''); just_key = f"justification_{category}_{q_num}_{index}"
                                 st.text_area(label="Justification Text Area", value=justification_text, height=100, disabled=True, label_visibility="collapsed", key=just_key)
             else: st.warning("Analysis generated results, but they could not be grouped by category. Displaying raw list."); st.json(results_list)
