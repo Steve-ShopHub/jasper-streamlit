@@ -1035,8 +1035,8 @@ if st.session_state.pdf_bytes is not None:
                         for index, result_item in enumerate(category_items):
                             q_num = result_item.get('Question Number', 'N/A'); question_text = result_item.get('Question', 'N/A')
                             # --- NEW UI STRUCTURE within Expander ---
-                            expander_key = f"exp_{category}_{q_num}_{index}"
-                            with st.expander(f"**Q{q_num}:** {question_text}", key=expander_key):
+                            # Removed expander_key definition
+                            with st.expander(f"**Q{q_num}:** {question_text}"): # Removed key argument
                                 # Answer and Justification first
                                 st.markdown(f"**Answer:**")
                                 st.markdown(f"> {result_item.get('Answer', 'N/A')}") # Using blockquote for emphasis
