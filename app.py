@@ -42,7 +42,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 2. Configuration & Setup ---
-MODEL_NAME = "gemini-1.5-pro-preview-0514" # Using 1.5 Pro. Check availability/access.
+MODEL_NAME = "gemini-2.5-pro-preview-03-25" 
 MAX_VALIDATION_RETRIES = 1
 RETRY_DELAY_SECONDS = 3
 PROMPT_FILE = "prompt.txt"
