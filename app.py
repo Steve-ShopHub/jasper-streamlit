@@ -314,16 +314,27 @@ elif 'pdf_bytes_processed' in st.session_state:
 
 
 # --- Analysis Trigger (in Sidebar) ---
-# Disable button if file OR API key is missing, or if processing
 analyze_disabled = st.session_state.processing_complete or not st.session_state.pdf_bytes or not st.session_state.api_key
 analyze_button_tooltip = "Upload a PDF and enter API key to enable analysis." if analyze_disabled else "Start analyzing the document"
 
 if st.sidebar.button("✨ Analyze Document", key="analyze_button", disabled=analyze_disabled, help=analyze_button_tooltip, use_container_width=True, type="primary"):
-    # --- Check API Key again just before run ---
+    # --- GET and VALIDATE API Key ---
     current_api_key = st.session_state.get("api_key")
     if not current_api_key:
         st.error("API Key is missing. Please enter it in the sidebar.")
         st.stop() # Stop if key removed after button enabled somehow
+
+    # --- CONFIGURE GenAI Client HERE (Before Upload) ---
+    try:
+        genai.configure(api_key=current_api_key)
+        # Optional: Add a quick test like listing models to verify key validity early
+        # models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        st.toast("API Key configured for this run.", icon="🔑")
+    except Exception as config_err:
+        st.error(f"❌ Failed to configure Gemini API with provided key: {config_err}")
+        st.stop() # Stop if configuration fails
+    # --- End Configure GenAI ---
+
 
     # Reset states for the new run
     st.session_state.analysis_results = None; st.session_state.processing_complete = False
@@ -348,24 +359,40 @@ if st.sidebar.button("✨ Analyze Document", key="analyze_button", disabled=anal
         with open(temp_file_path, "wb") as f: f.write(st.session_state.pdf_bytes)
 
         status_text.info("🚀 Uploading to Google Cloud..."); progress_bar.progress(10, text="Uploading...")
-        # Add retry logic for file upload
+        # --- Upload File (Now client should be configured) ---
         for upload_attempt in range(3):
             try:
+                # This call now uses the client configured above
                 gemini_uploaded_file_ref = genai.upload_file(path=temp_file_path)
+                st.toast(f"File '{gemini_uploaded_file_ref.display_name}' uploaded.", icon="☁️")
                 break # Success
             except Exception as upload_err:
-                if upload_attempt < 2: st.warning(f"Upload failed (Try {upload_attempt+1}): {upload_err}. Retrying..."); time.sleep(2)
-                else: st.error(f"Upload failed: {upload_err}"); raise
-        if not gemini_uploaded_file_ref: raise Exception("Failed Gemini upload.")
+                # Check if the error is related to authentication
+                if "API key" in str(upload_err).lower() or "authenticat" in str(upload_err).lower():
+                     st.error(f"❌ File upload failed due to API key issue: {upload_err}")
+                     st.error("Please verify the entered API key has File API permissions.")
+                     raise # Stop the process immediately
+                elif upload_attempt < 2:
+                    st.warning(f"Upload failed (Try {upload_attempt+1}): {upload_err}. Retrying...")
+                    time.sleep(2)
+                else:
+                    st.error(f"Upload failed after multiple attempts: {upload_err}")
+                    raise # Re-raise the last error
+        if not gemini_uploaded_file_ref:
+             raise Exception("Failed Gemini upload after retries.")
+        # --- End Upload File ---
 
         progress_bar.progress(15, text="Uploaded.")
+
         num_sections = len(SECTIONS_TO_RUN); progress_per_section = (95 - 15) / num_sections if num_sections > 0 else 0
 
         # --- Process Sections ---
         for i, section_name in enumerate(SECTIONS_TO_RUN.keys()):
             current_progress = int(15 + (i * progress_per_section))
             progress_bar.progress(current_progress, text=f"Starting {section_name}...")
-            # Pass the user's API key from session state
+            # Pass the user's API key - generate_section_analysis will re-configure,
+            # which is slightly redundant but safe. Alternatively, remove configure
+            # from generate_section_analysis IF it's only called here.
             section_data, section_status, section_warnings = generate_section_analysis(
                 section_name, gemini_uploaded_file_ref, status_text, current_api_key
             )
@@ -382,15 +409,16 @@ if st.sidebar.button("✨ Analyze Document", key="analyze_button", disabled=anal
         st.session_state.processing_complete = True
 
     except Exception as main_err:
-         st.error(f"❌ CRITICAL ERROR during analysis: {main_err}"); st.error(traceback.format_exc());
+         # Error handling remains the same
+         st.error(f"❌ CRITICAL ERROR during analysis: {main_err}"); # st.error(traceback.format_exc()); # Keep traceback off for users
          overall_success = False; st.session_state.processing_complete = False
-         st.session_state.run_status_summary.append({"section": "Overall Process", "status": "Critical Error", "warnings": [str(main_err), "Check server logs."]})
-         status_text.error("Analysis failed due to a critical error.")
+         st.session_state.run_status_summary.append({"section": "Overall Process", "status": "Critical Error", "warnings": [str(main_err), "Check server logs for details."]})
+         status_text.error(f"Analysis failed: {main_err}") # Show specific error
     finally: # Cleanup
         time.sleep(4); status_text.empty(); progress_bar.empty()
         if gemini_uploaded_file_ref and hasattr(gemini_uploaded_file_ref, 'name'):
-             try: genai.delete_file(name=gemini_uploaded_file_ref.name)
-             except Exception as del_err: st.sidebar.warning(f"Cloud cleanup issue: {del_err}", icon="⚠️") # Show cleanup issue in sidebar
+             try: genai.delete_file(name=gemini_uploaded_file_ref.name) # Use configured client
+             except Exception as del_err: st.sidebar.warning(f"Cloud cleanup issue: {del_err}", icon="⚠️")
         if os.path.exists(temp_file_path):
              try: os.remove(temp_file_path)
              except Exception: pass
