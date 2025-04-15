@@ -208,7 +208,7 @@ def find_text_in_pdf(_pdf_bytes, search_text):
     # Build search terms list
     if num_words >= SEARCH_PREFIX_MIN_WORDS: term_10 = ' '.join(words[:10]); search_attempts.append({'term': term_10, 'desc': "first 10 words"})
     if num_words >= SEARCH_PREFIX_MIN_WORDS: term_5 = ' '.join(words[:5]); # Only add if different
-         if term_5 and term_5 != (search_attempts[0]['term'] if search_attempts else None): search_attempts.append({'term': term_5, 'desc': "first 5 words"})
+    if term_5 and term_5 != (search_attempts[0]['term'] if search_attempts else None): search_attempts.append({'term': term_5, 'desc': "first 5 words"})
     term_full = search_text_cleaned; # Add full text if different from prefixes
     if term_full and not any(term_full == a['term'] for a in search_attempts): search_attempts.append({'term': term_full, 'desc': "full text"})
     # Add first sentence if long enough and different

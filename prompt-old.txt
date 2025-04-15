@@ -1,0 +1,258 @@
+full_prompt_text = """**Task:**
+Your primary task is to meticulously analyse the attached facility agreement document. You MUST answer **every single question** listed below for the specified section. Prioritise accuracy and direct evidence from the text.
+
+**Output Requirements:**
+Generate a **single JSON array** as output, strictly adhering to the provided schema. Each object within the array MUST correspond to one question from the filtered list below. Ensure all **required** properties (`Question Number`, `Question Category`, `Question`, `Answer`, `Clause Reference`, `Clause Wording`, `Answer Justification`) are present in every object.
+
+*   **Completeness:** Ensure an object is generated for **every question** in the filtered list, even conditional ones.
+*   **Question Number:** Populate the 'Question Number' field with the corresponding number from the original list (1 to 78).
+*   **Answers:** Populate the 'Answer' field based on your analysis.
+    *   For questions with 'Answer Options', your 'Answer' **MUST** contain one of the provided options exactly as written (unless the option indicates free text like 'BLANK', 'Text', 'Date', in which case provide the specific text/date found).
+    *   For 'Multiselect' options, list all applicable options separated by commas.
+    *   If the document does not contain the information to answer a question, state 'Information Not Found' in the 'Answer' field.
+*   **Evidence:**
+    *   Populate the 'Clause Reference' field with the specific clause number(s) or section(s) referenced (e.g., 'Clause 14.1(a)', 'Section 5'). If no specific clause provides the answer, state 'N/A'.
+    *   Populate the 'Clause Wording' field with the **exact, full text** of the referenced clause(s) or relevant sentence(s). If 'Clause Reference' is 'N/A', this should also be 'N/A'.
+*   **Justification:** Populate the 'Answer Justification' field to briefly explain *why* the referenced clause and wording support the given 'Answer', especially if it's not immediately obvious. If the answer is 'Information Not Found' or 'N/A', explain briefly why (e.g., "Condition not met", "Term not defined in document").
+*   **Conditional Questions:** For questions with bracketed conditions (e.g., '[If yes...]'), if the condition is **not met** based on the answer to the preceding question *within the current section*, you MUST still include the question object in the JSON array. In such cases, set the 'Answer', 'Clause Reference', 'Clause Wording', and 'Answer Justification' fields to 'N/A - Condition Not Met'. Ensure the 'Question Number' field is still populated correctly.
+
+**Questions to Answer:**
+
+1.  **Question Category:** Agreement Details
+    **Question:** What is the date of the agreement you are reviewing?
+    **Answer Options:** Date
+2.  **Question Category:** Agreement Details
+    **Question:** Has a signed version of the agreement you are reviewing been provided?
+    **Answer Options:** Yes, No
+3.  **Question Category:** Agreement Details
+    **Question:** Governing law
+    **Answer Options:** Text *(Extract the specific governing law stated in the agreement)*
+4.  **Question Category:** Agreement Details
+    **Question:** Please detail the clause number of the governing law clause
+    **Answer Options:** BLANK
+5.  **Question Category:** Eligibility Part 1
+    **Question:** Does the agreement contain express provisions relating to sub-participations by Lenders?
+    **Answer Options:** Yes, No
+6.  **Question Category:** Eligibility Part 1
+    **Question:** [If yes to Q5] Is sub-participation defined?
+    **Answer Options:** Yes, No
+7.  **Question Category:** Eligibility Part 1
+    **Question:** [If yes to Q6] Please set out the relevant definition of sub-participation (including clause reference)
+    **Answer Options:** BLANK
+8.  **Question Category:** Eligibility Part 1
+    **Question:** Does the definition of sub-participation capture SRT?
+    **Answer Options:** Option to select: No - definition only relates to transfer of voting rights and/or total return swap or derivatives generally, Yes - definition expressly refers to securitisation, SRT, credit default swaps and/or any risk trade or any of the following key terms "risk protection", "credit protection", "risk mitigation", "risk transfer", "synthetic", "credit default swap", "securitisation", "risk or funded", "funded or risk", "credit mitigation", "risk participation"
+9.  **Question Category:** Eligibility Part 1
+    **Question:** [If yes to Q8] Select what conditions apply to the Lender's right to sub-participate
+    **Answer Options:** Multiselect: None, Borrower/Parent/Obligors consent, Borrower/Parent/Obligors consultation, Notice to Borrower/Parent/Obligors, Notice to Agent, Conditions relating to Permitted Lenders, Restricted Lenders and/or Competitors (or any similar concept), Other
+10. **Question Category:** Eligibility Part 1
+    **Question:** [If conditions relating to Permitted Lenders, Restricted Lenders and/or Competitors (or any similar concept) selected in Q9] Please detail what restrictions apply
+    **Answer Options:** BLANK
+11. **Question Category:** Eligibility Part 1
+    **Question:** [If Other selected in Q9] What other conditions apply?
+    **Answer Options:** BLANK
+12. **Question Category:** Eligibility Part 1
+    **Question:** [If Borrower/Parent/Obligors consent selected in Q9] Select all conditions that apply to Borrower's/Parent's/Obligors' consent
+    **Answer Options:** Multiselect: Not unreasonably withheld, Not unreasonably delayed, Deemed consent after a certain number of days, No conditions apply, Other
+13. **Question Category:** Eligibility Part 1
+    **Question:** [If Other selected in Q12] What other conditions apply?
+    **Answer Options:** BLANK
+14. **Question Category:** Eligibility Part 1
+    **Question:** [If Deemed consent selected in Q12] Number of days for deemed consent
+    **Answer Options:** BLANK
+15. **Question Category:** Eligibility Part 1
+    **Question:** Is this in days or Business Days?
+    **Answer Options:** Days, Business Days
+16. **Question Category:** Eligibility Part 1
+    **Question:** [If Notice to Borrower/Parent/Obligors selected in Q9] How many days notice to the Borrower/Parent/Obligors are required?
+    **Answer Options:** BLANK
+17. **Question Category:** Eligibility Part 1
+    **Question:** Is the notice period in days or Business Days?
+    **Answer Options:** Days, Business Days
+18. **Question Category:** Eligibility Part 1
+    **Question:** Is a form of notice specified?
+    **Answer Options:** Yes, No
+19. **Question Category:** Eligibility Part 1
+    **Question:** [If yes to Q18] Please detail the form of notice required
+    **Answer Options:** BLANK
+20. **Question Category:** Eligibility Part 1
+    **Question:** [If Borrower/Parent/Obligors consultation selected in Q9] Number of days required for consultation
+    **Answer Options:** BLANK
+21. **Question Category:** Eligibility Part 2
+    **Question:** Do any of the following key terms appear anywhere in the agreement, other than in the definition of sub-participation?
+    **Answer Options:** Multiselect: "risk protection", "credit protection", "risk mitigation", "risk transfer", "synthetic", "credit default swap", "securitisation", "risk or funded", "funded or risk", "credit mitigation", "risk participation"
+22. **Question Category:** Eligibility Part 2
+    **Question:** [If yes/terms selected in Q21] Please detail the relevant provision and clause number
+    **Answer Options:** BLANK
+23. **Question Category:** Eligibility Part 2
+    **Question:** [If yes/terms selected in Q21] Are there any conditions which apply to the provisions containing those key terms?
+    **Answer Options:** Multiselect: None, Borrower/Parent/Obligors consent, Borrower/Parent/Obligors consultation, Notice to Borrower/Parent/Obligors, Notice to Agent, Conditions relating to Permitted Lenders, Restricted Lenders and/or Competitors (or any similar concept), Other
+24. **Question Category:** Eligibility Part 2
+    **Question:** [If conditions relating to Permitted Lenders, Restricted Lenders and/or Competitors (or any similar concept) selected in Q23] Please detail what restrictions apply
+    **Answer Options:** BLANK
+25. **Question Category:** Eligibility Part 2
+    **Question:** [If Other selected in Q23] What other conditions apply?
+    **Answer Options:** BLANK
+26. **Question Category:** Eligibility Part 2
+    **Question:** [If Borrower/Parent/Obligors consent selected in Q23] Select all conditions that apply to Borrower's/Parent's/Obligors' consent
+    **Answer Options:** Multiselect: Not unreasonably withheld, Not unreasonably delayed, Deemed consent after a certain number of days, No conditions apply, Other
+27. **Question Category:** Eligibility Part 2
+    **Question:** [If Other selected in Q26] What other conditions apply?
+    **Answer Options:** BLANK
+28. **Question Category:** Eligibility Part 2
+    **Question:** [If Deemed consent selected in Q26] Number of days for deemed consent
+    **Answer Options:** BLANK
+29. **Question Category:** Eligibility Part 2
+    **Question:** Is this in days or Business Days?
+    **Answer Options:** Days, Business Days
+30. **Question Category:** Eligibility Part 2
+    **Question:** [If Notice to Borrower/Parent/Obligors selected in Q23] How many days notice to the Borrower/Parent/Obligors are required?
+    **Answer Options:** BLANK
+31. **Question Category:** Eligibility Part 2
+    **Question:** Is the notice period in days or Business Days?
+    **Answer Options:** Days, Business Days
+32. **Question Category:** Eligibility Part 2
+    **Question:** Is a form of notice specified?
+    **Answer Options:** Yes, No
+33. **Question Category:** Eligibility Part 2
+    **Question:** [If yes to Q32] Please detail the form of notice required
+    **Answer Options:** BLANK
+34. **Question Category:** Eligibility Part 2
+    **Question:** [If Borrower/Parent/Obligors consultation selected in Q23] Number of days required for consultation
+    **Answer Options:** BLANK
+35. **Question Category:** Eligibility
+    **Question:** Based on the questions in section Eligibility Part 1 and section Eligibility Part 2 above, please confirm if the facility you are reviewing can be included in a SRT without restrictions or conditions
+    **Answer Options:** Yes, No
+36. **Question Category:** Eligibility
+    **Question:** [If no to Q35] Please provide further details
+    **Answer Options:** BLANK
+37. **Question Category:** Confidentiality and Disclosure
+    **Question:** Does the agreement contain confidentiality/disclosure provisions?
+    **Answer Options:** Yes, No
+38. **Question Category:** Confidentiality and Disclosure
+    **Question:** [If yes to Q37] Please insert the relevant clause
+    **Answer Options:** BLANK
+39. **Question Category:** Confidentiality and Disclosure
+    **Question:** Is disclosure expressly permitted to any persons entering or potentially entering into transaction under which payments are to be made or may be made by reference to one or more Finance Documents (with or without restriction)?
+    **Answer Options:** Yes, No
+40. **Question Category:** Confidentiality and Disclosure
+    **Question:** Please set out the relevant provision including clause reference
+    **Answer Options:** BLANK
+41. **Question Category:** Confidentiality and Disclosure
+    **Question:** Is disclosure expressly permitted to any of the following parties in so far as they relate to any persons entering or potentially entering into transaction under which payments are made or may be made by reference to one or more Finance Documents (with or without restriction)?
+    **Answer Options:** Multiselect: Affiliates, Professional Advisers, Representatives, Related Funds, All of the above, None of the above
+42. **Question Category:** Confidentiality and Disclosure
+    **Question:** Is a confidentiality undertaking/other form of NDA required to disclose to any of these parties?
+    **Answer Options:** Multiselect: Affiliates, Professional Advisers, Representatives, Related Funds, Persons entering or potentially entering into transaction under which payments are to be made or may be made by reference to one or more Finance Documents, No confidentiality undertaking/other form of NDA required
+43. **Question Category:** Confidentiality and Disclosure
+    **Question:** Please set out the relevant definition of "Confidentiality Undertaking"
+    **Answer Options:** BLANK
+44. **Question Category:** Confidentiality and Disclosure
+    **Question:** [If Q42 indicates undertaking required] Is there a prescribed form of confidentiality undertaking / other form of NDA?
+    **Answer Options:** Yes, No
+45. **Question Category:** Confidentiality and Disclosure
+    **Question:** What form of confidentiality undertaking/other form of NDA is specified?
+    **Answer Options:** Multiselect: LMA form, Form agreed between the parties to the Facility Agreement, In the form set out in Schedule/Annex/Appendix/Side letter to loan document, LSTA form, Other form
+46. **Question Category:** Confidentiality and Disclosure
+    **Question:** [If 'In the form set out...' selected in Q45] Is the form of confidentiality undertaking substantially in a recommended form of the LMA?
+    **Answer Options:** Yes, No
+47. **Question Category:** Confidentiality and Disclosure
+    **Question:** [If 'Other form' selected in Q45] Is the form of confidentiality undertaking substantially in a recommended form of the LMA?
+    **Answer Options:** Yes, No
+48. **Question Category:** Confidentiality and Disclosure
+    **Question:** Does the definition of "Confidentiality Undertaking" expressly include any other conditions?
+    **Answer Options:** Yes, No
+49. **Question Category:** Confidentiality and Disclosure
+    **Question:** [If yes to Q48] Please detail any additional conditions which apply
+    **Answer Options:** BLANK
+50. **Question Category:** Confidentiality and Disclosure
+    **Question:** Is Borrower/Obligor/Parent consent required to disclose to any of these parties?
+    **Answer Options:** Multiselect: Affiliates, Professional Advisers, Representatives, Related Funds, Persons entering or potentially entering into transaction under which payments are to be made or may be made by reference to one or more Finance Documents, None of the above
+51. **Question Category:** Confidentiality and Disclosure
+    **Question:** Please set out the relevant consent provision including clause reference
+    **Answer Options:** BLANK
+52. **Question Category:** Confidentiality and Disclosure
+    **Question:** Is there a requirement for the Borrower, Obligor, Parent to be notified in order for disclosure of confidential information to be permitted to any of these parties?
+    **Answer Options:** Multiselect: Affiliates, Professional Advisers, Representatives, Related Funds, Persons entering or potentially entering into transaction under which payments are to be made or may be made by reference to one or more Finance Documents, None of the above
+53. **Question Category:** Confidentiality and Disclosure
+    **Question:** Please set out the relevant notification provision including clause reference
+    **Answer Options:** BLANK
+54. **Question Category:** Confidentiality and Disclosure
+    **Question:** If a confidentiality undertaking / other form of NDA is required, is there any requirement to obtain consent from and/ or notify any party in relation to that undertaking/ NDA?
+    **Answer Options:** Multiselect: Requirement to obtain consent in relation to the Confidentiality undertaking/NDA, Requirement to notify in relation to the Confidentiality undertaking/NDA, Requirement to send a copy of the Confidentiality Undertaking to the Borrower/Parent/Obligors before disclosure, Requirement to send a copy of the confidentiality undertaking to the Borrower/Parent/Obligors after disclosure, No requirements, No confidentiality undertaking/ other form of NDA required
+55. **Question Category:** Confidentiality and Disclosure
+    **Question:** Please set out the relevant consent provision including clause reference.
+    **Answer Options:** BLANK
+56. **Question Category:** Confidentiality and Disclosure
+    **Question:** Is there any restriction in the confidentiality or in the assignment and transfer provisions which prevents the Lender from disclosing information to any of the following?
+    **Answer Options:** Multiselect: Permitted Lenders, Restricted Lenders, Competitors (or any similar concept), No restrictions, No Permitted Lender/Restricted Lender/Competitor concepts
+57. **Question Category:** Confidentiality and Disclosure
+    **Question:** Please set out the relevant restriction including clause reference.
+    **Answer Options:** BLANK
+58. **Question Category:** Confidentiality and Disclosure
+    **Question:** Ignoring any requirement for a confidentiality undertaking substantially in a form recommended by the LMA, is disclosure expressly permitted to persons [potentially] entering into a transaction under which payments are made/may be made without conditions
+    **Answer Options:** Yes, No
+59. **Question Category:** Confidentiality and Disclosure
+    **Question:** Is disclosure expressly permitted to any Affiliates to National Westminster Bank Plc without restriction or any conditions? Answer 'Yes' even if conditions apply, as long as they only include the accepted exceptions (namely: declaring its confidential nature to whom it is being disclosed, information regarding price sensitivity, recipient's professional obligations to maintain confidentiality).
+    **Answer Options:** Yes, No
+60. **Question Category:** Confidentiality and Disclosure
+    **Question:** Please detail any restrictions or conditions which apply to disclosure to Affiliates. If the conditions found are only part of the accepted exceptions list (namely: declaring its confidential nature to whom it is being disclosed, information regarding price sensitivity, recipient's professional obligations to maintain confidentiality), you do not need to report them; just answer 'No'. Otherwise, detail the conditions.
+    **Answer Options:** Text
+61. **Question Category:** Confidentiality and Disclosure
+    **Question:** Is disclosure expressly permitted to any Representatives to National Westminster Bank Plc without restriction or any conditions? Answer 'Yes' even if conditions apply, as long as they only include the accepted exceptions list (namely: declaring its confidential nature to whom it is being disclosed, information regarding price sensitivity, recipient's professional obligations to maintain confidentiality).
+    **Answer Options:** Yes, No
+62. **Question Category:** Confidentiality and Disclosure
+    **Question:** Please detail any restrictions or conditions which apply to disclosure to Representatives. If the conditions found are only part of the accepted exceptions list (namely: declaring its confidential nature to whom it is being disclosed, information regarding price sensitivity, recipient's professional obligations to maintain confidentiality), you do not need to report them; just answer 'No'. Otherwise, detail the conditions.
+    **Answer Options:** TextMultiline
+63. **Question Category:** Confidentiality and Disclosure
+    **Question:** Please set out the relevant definition of “Representative"
+    **Answer Options:** TextMultiline
+64. **Question Category:** Additional Borrowers
+    **Question:** Does the agreement provide for the accession of Additional Borrowers?
+    **Answer Options:** Yes, No
+65. **Question Category:** Additional Borrowers
+    **Question:** Does the accession of additional Borrowers require Lender Consent?
+    **Answer Options:** Consent of Simple majority Lenders (over 50%), Consent of simple majority plus consent of affected lenders, Consent of Majority Lenders (66.666%), Consent of Super majority Lenders (75%), Consent of all Lenders, Silent, Consent of all affected Lenders, Consent of Majority (66.666%) plus consent of affected Lenders, Other, No Lender consent required
+66. **Question Category:** Additional Borrowers
+    **Question:** Please provide details of the relevant requirements
+    **Answer Options:** Text
+67. **Question Category:** Interest rate provisions
+    **Question:** Does the facility contain an interest rate floor?
+    **Answer Options:** Yes, No
+68. **Question Category:** Interest rate provisions
+    **Question:** Is the interest rate floor set at a rate other than zero?
+    **Answer Options:** Yes, No
+69. **Question Category:** Interest rate provisions
+    **Question:** Please set out the relevant rate
+    **Answer Options:** Text
+70. **Question Category:** Interest rate provisions
+    **Question:** Does the facility contain an interest rate cap?
+    **Answer Options:** Yes, No
+71. **Question Category:** Interest rate provisions
+    **Question:** Please provide further details.
+    **Answer Options:** Text
+72. **Question Category:** Prepayment Fee
+    **Question:** Is a charge or fee payable on prepayments (whether full or partial)?
+    **Answer Options:** Yes, No
+73. **Question Category:** Prepayment Fee
+    **Question:** Prepayments permitted up to certain amount per year before charges?
+    **Answer Options:** Yes, No
+74. **Question Category:** Prepayment Fee
+    **Question:** What is the threshold of prepayments permitted before charges are incurred?
+    **Answer Options:** Text
+75. **Question Category:** Prepayment Fee
+    **Question:** Is there a date after which borrower can make prepayments without fee or penalty?
+    **Answer Options:** Yes, No, Yes but unable to confirm date
+76. **Question Category:** Prepayment Fee
+    **Question:** Date after which borrower can make prepayments without fee or penalty
+    **Answer Options:** Text
+77. **Question Category:** Prepayment Fee
+    **Question:** What prepayment fees are payable?
+    **Answer Options:** Text
+78. **Question Category:** Prepayment Fee
+    **Question:** Please detail the relevant clause which governs the payment of a prepayment fee
+    **Answer Options:** Text
+
+**Final Instruction:**
+Ensure the final output is a valid JSON array containing an object for **all** questions provided in the filtered list above, following all formatting and content instructions precisely. **Crucially, double-check that every object in the array contains all the required keys (`Question Number`, `Question Category`, `Question`, `Answer`, `Clause Reference`, `Clause Wording`, `Answer Justification`) before concluding.**
+"""
