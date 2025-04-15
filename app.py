@@ -1,5 +1,5 @@
 # app.py
-# --- COMPLETE FILE (v4 - Added Plotly Scatter Plot) ---
+# --- COMPLETE FILE (v5 - Added History Loading & GCS Integration) ---
 
 import streamlit as st
 import pandas as pd
@@ -16,14 +16,11 @@ import time
 from datetime import datetime
 import traceback
 from collections import defaultdict # To group questions by category
-import plotly.express as px # <-- IMPORT PLOTLY
+import plotly.express as px
 import google.cloud.firestore
+import google.cloud.storage # <-- IMPORT GCS
 import google.oauth2.service_account
-
-# Load credentials from secrets
-key_dict = st.secrets["firestore"]
-creds = google.oauth2.service_account.Credentials.from_service_account_info(key_dict)
-db = google.cloud.firestore.Client(credentials=creds)
+from google.api_core.exceptions import NotFound # For GCS blob check
 
 # --- 1. SET PAGE CONFIG (MUST BE FIRST st COMMAND) ---
 st.set_page_config(
@@ -48,8 +45,30 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- Load credentials and Initialize Clients ---
+try:
+    # Firestore
+    firestore_key_dict = st.secrets["firestore"]
+    firestore_creds = google.oauth2.service_account.Credentials.from_service_account_info(firestore_key_dict)
+    db = google.cloud.firestore.Client(credentials=firestore_creds)
+
+    # Google Cloud Storage
+    gcs_key_dict = st.secrets.get("gcs", firestore_key_dict) # Reuse Firestore creds if GCS specific aren't provided
+    gcs_creds = google.oauth2.service_account.Credentials.from_service_account_info(gcs_key_dict)
+    storage_client = google.cloud.storage.Client(credentials=gcs_creds)
+    GCS_BUCKET_NAME = st.secrets["gcs_config"]["bucket_name"]
+    GCS_PDF_FOLDER = "analysis_pdfs" # Define a folder within the bucket
+
+except KeyError as e:
+    st.error(f"❌ Configuration Error: Missing key '{e}' in Streamlit secrets (`secrets.toml`). Please check your configuration.")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ Failed to initialize cloud clients: {e}")
+    print(traceback.format_exc())
+    st.stop()
+
 # --- 2. Configuration & Setup ---
-MODEL_NAME = "gemini-2.5-pro-preview-03-25" 
+MODEL_NAME = "gemini-2.5-pro-preview-03-25"
 MAX_VALIDATION_RETRIES = 1
 RETRY_DELAY_SECONDS = 3
 PROMPT_FILE = "prompt.txt"
@@ -284,6 +303,56 @@ def render_pdf_page_to_image(_pdf_bytes, page_number, highlight_instances=None, 
         if doc: doc.close()
     return image_bytes, render_status_message
 
+def upload_to_gcs(bucket_name, source_bytes, destination_blob_name, status_placeholder=None):
+    """Uploads bytes to GCS bucket."""
+    if status_placeholder: status_placeholder.info(f"☁️ Uploading PDF to Google Cloud Storage...")
+    try:
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(destination_blob_name)
+        blob.upload_from_string(source_bytes, content_type='application/pdf')
+        if status_placeholder: status_placeholder.info(f"☁️ PDF successfully uploaded to gs://{bucket_name}/{destination_blob_name}")
+        print(f"Uploaded to gs://{bucket_name}/{destination_blob_name}")
+        return f"gs://{bucket_name}/{destination_blob_name}"
+    except Exception as e:
+        if status_placeholder: status_placeholder.error(f"❌ GCS Upload Failed: {e}")
+        print(f"GCS Upload Error: {e}\n{traceback.format_exc()}")
+        raise # Re-raise the exception to be caught by the main analysis loop
+
+def download_from_gcs(bucket_name, source_blob_name):
+    """Downloads a blob from the bucket."""
+    try:
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(source_blob_name)
+        pdf_bytes = blob.download_as_bytes()
+        return pdf_bytes
+    except NotFound:
+        st.error(f"❌ Error: PDF file not found in Google Cloud Storage at gs://{bucket_name}/{source_blob_name}")
+        return None
+    except Exception as e:
+        st.error(f"❌ Failed to download PDF from GCS: {e}")
+        print(f"GCS Download Error: {e}\n{traceback.format_exc()}")
+        return None
+
+def reset_app_state():
+    """Resets the session state for a new analysis or clearing history."""
+    st.session_state.pdf_bytes = None
+    st.session_state.pdf_display_ready = False
+    st.session_state.analysis_results = None
+    st.session_state.analysis_complete = False
+    st.session_state.processing_in_progress = False
+    st.session_state.current_page = 1
+    st.session_state.run_status_summary = []
+    st.session_state.excel_data = None
+    st.session_state.search_trigger = None
+    st.session_state.last_search_result = None
+    st.session_state.show_wording_states = defaultdict(bool)
+    st.session_state.viewing_history = False # Ensure history view is exited
+    st.session_state.history_filename = None
+    st.session_state.history_timestamp = None
+    # Keep API key and selected sections if user wants to run again
+    # st.session_state.api_key = None # Optionally clear API key
+    # st.session_state.selected_sections_to_run = list(ALL_SECTIONS.keys())[:1] # Reset sections?
+
 # --- 4. Initialize Session State ---
 if 'show_wording_states' not in st.session_state: st.session_state.show_wording_states = defaultdict(bool)
 if 'current_page' not in st.session_state: st.session_state.current_page = 1
@@ -299,115 +368,242 @@ if 'search_trigger' not in st.session_state: st.session_state.search_trigger = N
 if 'last_search_result' not in st.session_state: st.session_state.last_search_result = None
 if 'api_key' not in st.session_state: st.session_state.api_key = None
 if 'selected_sections_to_run' not in st.session_state: st.session_state.selected_sections_to_run = list(ALL_SECTIONS.keys())[:1] # Default to only first section for testing
+if 'load_history_id' not in st.session_state: st.session_state.load_history_id = None # For history loading trigger
+if 'viewing_history' not in st.session_state: st.session_state.viewing_history = False # Flag for history view mode
+if 'history_filename' not in st.session_state: st.session_state.history_filename = None # Store filename when viewing history
+if 'history_timestamp' not in st.session_state: st.session_state.history_timestamp = None # Store timestamp when viewing history
 
-# --- 5. Streamlit UI Logic ---
+
+# --- 5. Load History Data (if triggered) ---
+if st.session_state.load_history_id:
+    history_id = st.session_state.pop('load_history_id') # Get ID and clear trigger
+    st.info(f"📜 Loading historical analysis: {history_id}...")
+    try:
+        doc_ref = db.collection("analysis_runs").document(history_id)
+        doc_snapshot = doc_ref.get()
+
+        if doc_snapshot.exists:
+            run_data = doc_snapshot.to_dict()
+            gcs_pdf_path = run_data.get("gcs_pdf_path")
+            results = run_data.get("results")
+            filename = run_data.get("filename", "N/A")
+            timestamp = run_data.get("analysis_timestamp") # Firestore timestamp object
+            run_summary = run_data.get("run_status", []) # Load summary if saved
+
+            if not gcs_pdf_path:
+                 st.error("❌ History record is missing the PDF file path (gcs_pdf_path). Cannot load.")
+            elif not results:
+                 st.error("❌ History record is missing analysis results. Cannot load.")
+            else:
+                # Download PDF from GCS
+                if gcs_pdf_path.startswith("gs://"):
+                    path_parts = gcs_pdf_path[5:].split("/", 1)
+                    hist_bucket_name = path_parts[0]
+                    hist_blob_name = path_parts[1]
+                else: # Assume path format is FOLDER/FILENAME.PDF
+                     hist_bucket_name = GCS_BUCKET_NAME # Use configured bucket
+                     hist_blob_name = gcs_pdf_path
+
+                with st.spinner(f"Downloading PDF from gs://{hist_bucket_name}/{hist_blob_name}..."):
+                    pdf_bytes_from_hist = download_from_gcs(hist_bucket_name, hist_blob_name)
+
+                if pdf_bytes_from_hist:
+                    # Reset state before loading historical data
+                    reset_app_state()
+
+                    # Load historical data into session state
+                    st.session_state.pdf_bytes = pdf_bytes_from_hist
+                    st.session_state.analysis_results = results
+                    st.session_state.run_status_summary = run_summary
+                    st.session_state.analysis_complete = True
+                    st.session_state.pdf_display_ready = True
+                    st.session_state.viewing_history = True
+                    st.session_state.history_filename = filename
+                    st.session_state.history_timestamp = timestamp.strftime('%Y-%m-%d %H:%M:%S') if hasattr(timestamp, 'strftime') else str(timestamp)
+                    st.session_state.current_page = 1 # Reset to first page
+
+                    st.success(f"✅ Successfully loaded history for '{filename}' ({st.session_state.history_timestamp}).")
+                    time.sleep(1) # Give user time to see message
+                    st.rerun() # Rerun to update UI immediately
+                else:
+                    # Download failed, error shown by download_from_gcs
+                    st.session_state.viewing_history = False # Ensure we are not stuck in history mode
+        else:
+            st.error(f"❌ History record with ID '{history_id}' not found in database.")
+            st.session_state.viewing_history = False
+
+    except Exception as e:
+        st.error(f"❌ Error loading historical data: {e}")
+        print(f"History Load Error: {e}\n{traceback.format_exc()}")
+        st.session_state.viewing_history = False # Ensure we are not stuck in history mode
+
+
+# --- 6. Streamlit UI Logic ---
 st.title("JASPER - Just A Smart Platform for Extraction and Review")
-st.markdown("Upload a PDF agreement, **enter your Gemini API Key**, **select sections**, click 'Analyse'. Results grouped below. Click clause references to view & highlight.")
+
+# --- Display History Mode Banner ---
+if st.session_state.viewing_history:
+    hist_ts_str = st.session_state.history_timestamp or "N/A"
+    st.info(f"📜 **Viewing Historical Analysis:** File: **{st.session_state.history_filename}** (Generated: {hist_ts_str})")
+    if st.button("⬅️ Exit History View / Start New Analysis", key="clear_history_view"):
+        reset_app_state()
+        st.rerun()
+    st.markdown("---") # Separator
+
+elif not st.session_state.analysis_complete: # Only show initial message if not viewing history and not complete
+    st.markdown("Upload a PDF agreement, **enter your Gemini API Key**, **select sections**, click 'Analyse'. Results grouped below. Click clause references to view & highlight.")
 
 # --- Sidebar Setup ---
 st.sidebar.markdown("## Controls")
 
-# --- API Key Input (in Sidebar) ---
-api_key_input = st.sidebar.text_input("Enter your Google AI Gemini API Key", type="password", key="api_key_input", help="Your API key is used only for this session and is not stored long-term.", value=st.session_state.get("api_key", ""))
-if api_key_input != st.session_state.api_key: st.session_state.api_key = api_key_input; st.rerun()
-if not st.session_state.api_key and not st.session_state.analysis_complete and st.session_state.pdf_bytes: st.sidebar.warning("API Key required to run analysis.", icon="🔑")
+# --- Conditional Controls (Only show if NOT viewing history) ---
+if not st.session_state.viewing_history:
+    st.sidebar.markdown("### 1. API Key")
+    # --- API Key Input (in Sidebar) ---
+    api_key_input = st.sidebar.text_input("Enter your Google AI Gemini API Key", type="password", key="api_key_input", help="Your API key is used only for this session and is not stored.", value=st.session_state.get("api_key", ""))
+    if api_key_input != st.session_state.api_key: st.session_state.api_key = api_key_input; st.rerun()
+    if not st.session_state.api_key and not st.session_state.analysis_complete and not st.session_state.processing_in_progress : st.sidebar.warning("API Key required to run analysis.", icon="🔑")
 
-# --- File Upload (in Sidebar) ---
-uploaded_file_obj = st.sidebar.file_uploader("Upload Facility Agreement PDF", type="pdf", key=f"pdf_uploader_{st.session_state.run_key}")
-if uploaded_file_obj is not None:
-    new_file_bytes = uploaded_file_obj.getvalue()
-    if new_file_bytes != st.session_state.get('pdf_bytes'):
-        st.session_state.pdf_bytes = new_file_bytes; st.session_state.pdf_display_ready = True
-        st.session_state.analysis_results = None; st.session_state.analysis_complete = False; st.session_state.processing_in_progress = False; st.session_state.current_page = 1
-        st.session_state.run_status_summary = []; st.session_state.excel_data = None; st.session_state.search_trigger = None; st.session_state.last_search_result = None
-        st.session_state.show_wording_states = defaultdict(bool)
-        st.toast("✅ New PDF file loaded. Viewer ready.", icon="📄"); st.rerun()
+    st.sidebar.markdown("### 2. Upload PDF")
+    # --- File Upload (in Sidebar) ---
+    uploaded_file_obj = st.sidebar.file_uploader("Upload Facility Agreement PDF", type="pdf", key=f"pdf_uploader_{st.session_state.run_key}")
+    if uploaded_file_obj is not None:
+        new_file_bytes = uploaded_file_obj.getvalue()
+        if new_file_bytes != st.session_state.get('pdf_bytes'):
+             # Reset state completely when a new file is uploaded
+            reset_app_state()
+            st.session_state.pdf_bytes = new_file_bytes
+            st.session_state.pdf_display_ready = True
+            # Keep API key and section selection
+            st.session_state.api_key = api_key_input # Re-capture current key just in case
+            # st.session_state.selected_sections_to_run = selected_sections # Re-capture selected sections
 
-# --- Section Selection for Analysis (NEW) ---
-st.sidebar.markdown("### Select Sections to Analyse")
-selected_sections = st.sidebar.multiselect("Choose sections:", options=list(ALL_SECTIONS.keys()), default=st.session_state.selected_sections_to_run, key="section_selector", help="Select which parts of the document you want to analyse in this run.")
-if selected_sections != st.session_state.selected_sections_to_run: st.session_state.selected_sections_to_run = selected_sections; st.rerun()
+            st.toast("✅ New PDF file loaded. Viewer ready.", icon="📄")
+            st.rerun()
+    elif not st.session_state.pdf_bytes:
+         st.sidebar.info("Upload a PDF to enable analysis.")
 
-# --- Analysis Trigger (in Sidebar) ---
-can_analyse = (st.session_state.pdf_bytes is not None and st.session_state.api_key is not None and not st.session_state.processing_in_progress and not st.session_state.analysis_complete and st.session_state.selected_sections_to_run)
-analyse_button_tooltip = "Analysis complete for the current file." if st.session_state.analysis_complete else "Analysis is currently running." if st.session_state.processing_in_progress else "Upload a PDF file first." if not st.session_state.pdf_bytes else "Enter your Gemini API key first." if not st.session_state.api_key else "Select at least one section to analyse." if not st.session_state.selected_sections_to_run else "Start analyzing the selected sections"
-if st.sidebar.button("✨ Analyse Document", key="analyse_button", disabled=not can_analyse, help=analyse_button_tooltip, use_container_width=True, type="primary"):
-    if not st.session_state.api_key: st.error("API Key is missing. Please enter it in the sidebar.")
-    elif not st.session_state.pdf_bytes: st.error("No PDF file uploaded. Please upload a file.")
-    elif not st.session_state.selected_sections_to_run: st.error("No sections selected for analysis. Please select sections in the sidebar.")
-    else:
-        st.session_state.processing_in_progress = True; st.session_state.analysis_complete = False; st.session_state.analysis_results = []
-        st.session_state.run_key += 1; st.session_state.run_status_summary = []; st.session_state.excel_data = None; st.session_state.search_trigger = None
-        st.session_state.last_search_result = None; st.session_state.show_wording_states = defaultdict(bool)
-        current_api_key = st.session_state.api_key; run_start_time = datetime.now(); run_timestamp_str = run_start_time.strftime("%Y-%m-%d %H:%M:%S")
-        base_file_name = getattr(uploaded_file_obj, 'name', f"upload_{run_start_time.strftime('%Y%m%d%H%M%S')}.pdf")
-        try: genai.configure(api_key=current_api_key); st.toast("API Key validated and configured.", icon="🔑")
-        except Exception as config_err: st.error(f"❌ Failed to configure Gemini API with provided key: {config_err}"); st.session_state.processing_in_progress = False; st.stop()
-        status_container = st.container(); progress_bar = status_container.progress(0, text="Initializing analysis..."); status_text = status_container.empty()
-        temp_dir = "temp_uploads"; safe_base_name = re.sub(r'[^\w\-.]', '_', base_file_name); temp_file_path = os.path.join(APP_DIR, temp_dir, f"{run_start_time.strftime('%Y%m%d%H%M%S')}_{safe_base_name}")
-        os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
-        gemini_uploaded_file_ref = None; all_validated_data = []; overall_success = True
-        try:
-            status_text.info("💾 Saving file temporarily..."); progress_bar.progress(5, text="Saving temp file...");
-            with open(temp_file_path, "wb") as f: f.write(st.session_state.pdf_bytes)
-            status_text.info("☁️ Uploading file to Google Cloud AI..."); progress_bar.progress(10, text="Uploading to cloud...")
-            for upload_attempt in range(3):
-                try: gemini_uploaded_file_ref = genai.upload_file(path=temp_file_path); st.toast(f"File '{gemini_uploaded_file_ref.display_name}' uploaded to cloud.", icon="☁️"); break
-                except Exception as upload_err:
-                    err_str = str(upload_err).lower()
-                    if "api key" in err_str or "authenticat" in err_str or "permission" in err_str: st.error(f"❌ File upload failed due to API key/permission issue: {upload_err}"); st.error("Please verify the API key has File API permissions enabled."); raise
-                    elif upload_attempt < 2: st.warning(f"Upload attempt {upload_attempt+1} failed: {upload_err}. Retrying..."); time.sleep(2 + upload_attempt)
-                    else: st.error(f"Upload failed after multiple attempts: {upload_err}"); raise
-            if not gemini_uploaded_file_ref: raise Exception("Failed to upload file to Google Cloud AI after retries.")
-            progress_bar.progress(15, text="File uploaded. Starting section analysis...")
-            sections_to_process = st.session_state.selected_sections_to_run; num_sections = len(sections_to_process); progress_per_section = (95 - 15) / num_sections if num_sections > 0 else 0
-            for i, section_name in enumerate(sections_to_process):
-                if section_name not in ALL_SECTIONS: st.warning(f"Skipping invalid section '{section_name}' found in selection."); continue
-                current_progress = int(15 + (i * progress_per_section)); progress_bar.progress(current_progress, text=f"Analysing Section: {section_name}...")
-                section_data, section_status, section_warnings = generate_section_analysis(section_name, gemini_uploaded_file_ref, status_text, current_api_key)
-                st.session_state.run_status_summary.append({"section": section_name, "status": section_status, "warnings": section_warnings})
-                if section_status == "Success" and section_data:
-                    for item in section_data: item["File Name"] = base_file_name; item["Generation Time"] = run_timestamp_str
-                    all_validated_data.extend(section_data)
-                else: overall_success = False
-                progress_bar.progress(int(15 + ((i + 1) * progress_per_section)), text=f"Completed: {section_name}")
-            st.session_state.analysis_results = all_validated_data; progress_bar.progress(100, text="Analysis process finished!")
-            if overall_success: status_text.success("🏁 Analysis finished successfully!")
-            else: status_text.warning("🏁 Analysis finished, but some sections encountered issues (see summary below).")
-            st.session_state.analysis_complete = True
-# Inside the 'Analyse Document' button logic, after results are ready
-            if overall_success and all_validated_data:
-                try:
-                    status_text.info("💾 Saving results to database...")
-                    timestamp = datetime.now()
-                    doc_ref = db.collection("analysis_runs").document(f"{base_file_name}_{timestamp.isoformat()}")
-                    doc_ref.set({
-                        "filename": base_file_name,
-                        "analysis_timestamp": timestamp,
-                        "results": all_validated_data, # Store the whole list
-                        "run_status": st.session_state.run_status_summary # Maybe store summary too
-                    })
-                    status_text.info("💾 Results saved successfully.")
-                    time.sleep(1)
-                except Exception as db_err:
-                    st.error(f"❌ Failed to save results to database: {db_err}")
-                    print(f"DB Save Error: {db_err}\n{traceback.format_exc()}")            
-        except Exception as main_err:
-            st.error(f"❌ CRITICAL ERROR during analysis workflow: {main_err}"); print(traceback.format_exc())
-            overall_success = False; st.session_state.analysis_complete = False
-            st.session_state.run_status_summary.append({"section": "Overall Process Control", "status": "Critical Error", "warnings": [str(main_err), "Analysis halted. See logs."]})
-            status_text.error(f"Analysis stopped due to critical error: {main_err}")
-        finally:
-            st.session_state.processing_in_progress = False; time.sleep(4); status_text.empty(); progress_bar.empty()
-            if gemini_uploaded_file_ref and hasattr(gemini_uploaded_file_ref, 'name'):
-                try: status_text.info(f"☁️ Deleting temporary cloud file: {gemini_uploaded_file_ref.name}..."); genai.delete_file(name=gemini_uploaded_file_ref.name); st.toast("Cloud file deleted.", icon="🗑️"); time.sleep(1); status_text.empty()
-                except Exception as del_err: st.sidebar.warning(f"Cloud cleanup issue: {del_err}", icon="⚠️"); status_text.warning(f"Could not delete cloud file: {del_err}"); print(f"WARN: Failed to delete cloud file {gemini_uploaded_file_ref.name}: {del_err}")
-            if os.path.exists(temp_file_path):
-                try: os.remove(temp_file_path)
-                except Exception as local_del_err: st.sidebar.warning(f"Local temp file cleanup issue: {local_del_err}", icon="⚠️"); print(f"WARN: Failed to delete local temp file {temp_file_path}: {local_del_err}")
-        st.rerun()
 
-# --- Display Area (Results and PDF Viewer) ---
+    st.sidebar.markdown("### 3. Select Sections")
+    # --- Section Selection for Analysis (NEW) ---
+    selected_sections = st.sidebar.multiselect("Choose sections:", options=list(ALL_SECTIONS.keys()), default=st.session_state.selected_sections_to_run, key="section_selector", help="Select which parts of the document you want to analyse in this run.")
+    if selected_sections != st.session_state.selected_sections_to_run: st.session_state.selected_sections_to_run = selected_sections; # No rerun needed just for selection change
+
+    st.sidebar.markdown("### 4. Run Analysis")
+    # --- Analysis Trigger (in Sidebar) ---
+    can_analyse = (st.session_state.pdf_bytes is not None and st.session_state.api_key is not None and not st.session_state.processing_in_progress and not st.session_state.analysis_complete and st.session_state.selected_sections_to_run)
+    analyse_button_tooltip = "Analysis complete for the current file." if st.session_state.analysis_complete else "Analysis is currently running." if st.session_state.processing_in_progress else "Upload a PDF file first." if not st.session_state.pdf_bytes else "Enter your Gemini API key first." if not st.session_state.api_key else "Select at least one section to analyse." if not st.session_state.selected_sections_to_run else "Start analyzing the selected sections"
+    if st.sidebar.button("✨ Analyse Document", key="analyse_button", disabled=not can_analyse, help=analyse_button_tooltip, use_container_width=True, type="primary"):
+        if not st.session_state.api_key: st.error("API Key is missing. Please enter it in the sidebar.")
+        elif not st.session_state.pdf_bytes: st.error("No PDF file uploaded. Please upload a file.")
+        elif not st.session_state.selected_sections_to_run: st.error("No sections selected for analysis. Please select sections in the sidebar.")
+        else:
+            st.session_state.processing_in_progress = True; st.session_state.analysis_complete = False; st.session_state.analysis_results = []
+            st.session_state.run_key += 1; st.session_state.run_status_summary = []; st.session_state.excel_data = None; st.session_state.search_trigger = None
+            st.session_state.last_search_result = None; st.session_state.show_wording_states = defaultdict(bool)
+            current_api_key = st.session_state.api_key; run_start_time = datetime.now(); run_timestamp_str = run_start_time.strftime("%Y-%m-%d %H:%M:%S")
+            # Use the actual UploadedFile object name if available, otherwise generate one
+            # Note: uploaded_file_obj might be None if analysis is somehow triggered without a new upload (shouldn't happen with guards)
+            # We need to access the name from the object *before* analysis starts, as it might be lost on rerun
+            if uploaded_file_obj:
+                 st.session_state.current_filename = uploaded_file_obj.name
+            elif not hasattr(st.session_state, 'current_filename') or not st.session_state.current_filename:
+                # Fallback if name isn't captured (e.g. state loss?)
+                st.session_state.current_filename = f"upload_{run_start_time.strftime('%Y%m%d%H%M%S')}.pdf"
+
+            base_file_name = st.session_state.current_filename # Use the stored filename
+
+            try: genai.configure(api_key=current_api_key); st.toast("API Key validated and configured.", icon="🔑")
+            except Exception as config_err: st.error(f"❌ Failed to configure Gemini API with provided key: {config_err}"); st.session_state.processing_in_progress = False; st.stop()
+            status_container = st.container(); progress_bar = status_container.progress(0, text="Initializing analysis..."); status_text = status_container.empty()
+            temp_dir = "temp_uploads"; safe_base_name = re.sub(r'[^\w\-.]', '_', base_file_name); temp_file_path = os.path.join(APP_DIR, temp_dir, f"{run_start_time.strftime('%Y%m%d%H%M%S')}_{safe_base_name}")
+            os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
+            gemini_uploaded_file_ref = None; all_validated_data = []; overall_success = True; gcs_file_path = None # Initialize GCS path
+
+            try:
+                status_text.info("💾 Saving file temporarily..."); progress_bar.progress(5, text="Saving temp file...");
+                with open(temp_file_path, "wb") as f: f.write(st.session_state.pdf_bytes)
+                status_text.info("☁️ Uploading file to Google Cloud AI..."); progress_bar.progress(10, text="Uploading to cloud...")
+                for upload_attempt in range(3):
+                    try: gemini_uploaded_file_ref = genai.upload_file(path=temp_file_path); st.toast(f"File '{gemini_uploaded_file_ref.display_name}' uploaded to cloud.", icon="☁️"); break
+                    except Exception as upload_err:
+                        err_str = str(upload_err).lower()
+                        if "api key" in err_str or "authenticat" in err_str or "permission" in err_str: st.error(f"❌ File upload failed due to API key/permission issue: {upload_err}"); st.error("Please verify the API key has File API permissions enabled."); raise
+                        elif upload_attempt < 2: st.warning(f"Upload attempt {upload_attempt+1} failed: {upload_err}. Retrying..."); time.sleep(2 + upload_attempt)
+                        else: st.error(f"Upload failed after multiple attempts: {upload_err}"); raise
+                if not gemini_uploaded_file_ref: raise Exception("Failed to upload file to Google Cloud AI after retries.")
+                progress_bar.progress(15, text="File uploaded. Starting section analysis...")
+                sections_to_process = st.session_state.selected_sections_to_run; num_sections = len(sections_to_process); progress_per_section = (95 - 15) / num_sections if num_sections > 0 else 0
+                for i, section_name in enumerate(sections_to_process):
+                    if section_name not in ALL_SECTIONS: st.warning(f"Skipping invalid section '{section_name}' found in selection."); continue
+                    current_progress = int(15 + (i * progress_per_section)); progress_bar.progress(current_progress, text=f"Analysing Section: {section_name}...")
+                    section_data, section_status, section_warnings = generate_section_analysis(section_name, gemini_uploaded_file_ref, status_text, current_api_key)
+                    st.session_state.run_status_summary.append({"section": section_name, "status": section_status, "warnings": section_warnings})
+                    if section_status == "Success" and section_data:
+                        for item in section_data: item["File Name"] = base_file_name; item["Generation Time"] = run_timestamp_str
+                        all_validated_data.extend(section_data)
+                    else: overall_success = False
+                    progress_bar.progress(int(15 + ((i + 1) * progress_per_section)), text=f"Completed: {section_name}")
+                st.session_state.analysis_results = all_validated_data; progress_bar.progress(100, text="Analysis process finished!")
+                if overall_success: status_text.success("🏁 Analysis finished successfully!")
+                else: status_text.warning("🏁 Analysis finished, but some sections encountered issues (see summary below).")
+                st.session_state.analysis_complete = True
+
+                # --- Save to GCS and Firestore (after successful analysis, even if partial) ---
+                if overall_success and all_validated_data and st.session_state.pdf_bytes:
+                    try:
+                        timestamp = datetime.now()
+                        # Use timestamp in blob name for uniqueness if needed, but Firestore ID is better
+                        firestore_doc_id = f"{safe_base_name}_{timestamp.isoformat()}"
+                        gcs_blob_name = f"{GCS_PDF_FOLDER}/{firestore_doc_id}.pdf"
+
+                        # Upload PDF to GCS
+                        gcs_file_path = upload_to_gcs(GCS_BUCKET_NAME, st.session_state.pdf_bytes, gcs_blob_name, status_text)
+
+                        # Save results and GCS path to Firestore
+                        status_text.info("💾 Saving results and PDF reference to database...")
+                        doc_ref = db.collection("analysis_runs").document(firestore_doc_id)
+                        doc_ref.set({
+                            "filename": base_file_name,
+                            "analysis_timestamp": timestamp, # Use Firestore server timestamp if preferred: firestore.SERVER_TIMESTAMP
+                            "results": all_validated_data,
+                            "run_status": st.session_state.run_status_summary,
+                            "gcs_pdf_path": gcs_file_path # Store the GCS path
+                        })
+                        status_text.success("💾 Results and PDF link saved successfully.")
+                        time.sleep(1)
+                    except Exception as db_gcs_err:
+                        st.error(f"❌ Failed to save results/PDF to cloud: {db_gcs_err}")
+                        print(f"DB/GCS Save Error: {db_gcs_err}\n{traceback.format_exc()}")
+                        # Decide if this should mark the overall run as failed? Maybe just warn.
+                        st.session_state.run_status_summary.append({
+                            "section": "Cloud Save",
+                            "status": "Failed",
+                            "warnings": [f"Error saving to GCS/Firestore: {db_gcs_err}"]
+                        })
+
+            except Exception as main_err:
+                st.error(f"❌ CRITICAL ERROR during analysis workflow: {main_err}"); print(traceback.format_exc())
+                overall_success = False; st.session_state.analysis_complete = False
+                st.session_state.run_status_summary.append({"section": "Overall Process Control", "status": "Critical Error", "warnings": [str(main_err), "Analysis halted. See logs."]})
+                status_text.error(f"Analysis stopped due to critical error: {main_err}")
+            finally:
+                st.session_state.processing_in_progress = False; time.sleep(4); status_text.empty(); progress_bar.empty()
+                if gemini_uploaded_file_ref and hasattr(gemini_uploaded_file_ref, 'name'):
+                    try: status_text.info(f"☁️ Deleting temporary Gemini cloud file: {gemini_uploaded_file_ref.name}..."); genai.delete_file(name=gemini_uploaded_file_ref.name); st.toast("Gemini cloud file deleted.", icon="🗑️"); time.sleep(1); status_text.empty()
+                    except Exception as del_err: st.sidebar.warning(f"Gemini cloud cleanup issue: {del_err}", icon="⚠️"); status_text.warning(f"Could not delete Gemini cloud file: {del_err}"); print(f"WARN: Failed to delete cloud file {gemini_uploaded_file_ref.name}: {del_err}")
+                if os.path.exists(temp_file_path):
+                    try: os.remove(temp_file_path)
+                    except Exception as local_del_err: st.sidebar.warning(f"Local temp file cleanup issue: {local_del_err}", icon="⚠️"); print(f"WARN: Failed to delete local temp file {temp_file_path}: {local_del_err}")
+            st.rerun()
+else:
+    # If viewing history, show minimal sidebar info or placeholders
+    st.sidebar.info("📜 Viewing historical data.")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("Click 'Exit History View' above to start a new analysis.")
+
+
+# --- 7. Display Area (Results and PDF Viewer) ---
 if st.session_state.pdf_bytes is not None:
     col1, col2 = st.columns([6, 4]) # Results | PDF Viewer
 
@@ -421,7 +617,9 @@ if st.session_state.pdf_bytes is not None:
                 final_status = "❌ Failed"
             elif has_warnings:
                 final_status = "⚠️ Issues"
-            with st.expander(f"📊 Analysis Run Summary ({final_status})", expanded=(final_status != "✅ Success")):
+            # Expand summary if viewing history OR if there were issues
+            expand_summary = st.session_state.viewing_history or (final_status != "✅ Success")
+            with st.expander(f"📊 Analysis Run Summary ({final_status})", expanded=expand_summary):
                 for item in st.session_state.run_status_summary:
                     icon = "✅" if item['status'] == "Success" else "❌" if item['status'] == "Failed" or "Error" in item['status'] else "⚠️"
                     st.markdown(f"**{item['section']}**: {icon} {item['status']}")
@@ -437,8 +635,8 @@ if st.session_state.pdf_bytes is not None:
 
         st.subheader("Analysis Results")
 
-        # --- Display Results (if analysis complete and results exist) ---
-        if st.session_state.analysis_complete and st.session_state.analysis_results:
+        # --- Display Results (if analysis complete/history loaded and results exist) ---
+        if (st.session_state.analysis_complete or st.session_state.viewing_history) and st.session_state.analysis_results:
             results_list = st.session_state.analysis_results
 
             # --- NEW: Scatter Plot Expander ---
@@ -485,13 +683,19 @@ if st.session_state.pdf_bytes is not None:
                 grouped_results[category].append(item)
 
             if categories_ordered:
+                # Try to maintain a consistent tab order if possible (e.g., based on ALL_SECTIONS)
+                # This is complex if results don't cover all sections. Simple sort for now.
+                categories_ordered.sort()
                 category_tabs = st.tabs(categories_ordered)
+
                 for i, category in enumerate(categories_ordered):
                     with category_tabs[i]:
                         category_items = sorted(grouped_results[category], key=lambda x: x.get('Question Number', float('inf')))
                         for index, result_item in enumerate(category_items):
                             q_num = result_item.get('Question Number', 'N/A'); question_text = result_item.get('Question', 'N/A')
-                            with st.expander(f"**Q{q_num}:** {question_text}"): # Removed key=...
+                            # Use a more unique key including category to avoid clashes if same Q# appears unexpectedly elsewhere
+                            expander_key = f"exp_{category}_{q_num}_{index}"
+                            with st.expander(f"**Q{q_num}:** {question_text}", key=expander_key):
                                 st.markdown(f"**Answer:**"); st.markdown(f"> {result_item.get('Answer', 'N/A')}"); st.markdown("---")
                                 evidence_list = result_item.get('Evidence', [])
                                 if evidence_list:
@@ -509,31 +713,52 @@ if st.session_state.pdf_bytes is not None:
                                             else: st.caption("No clause reference provided.")
                                         with ev_cols[1]:
                                             if clause_wording != 'N/A':
-                                                toggle_key = f"toggle_wording_{base_key}"; show_wording = st.toggle("Show Wording", key=toggle_key, value=st.session_state.show_wording_states[toggle_key], help="Show/hide the exact clause wording extracted by the AI.")
-                                                if show_wording != st.session_state.show_wording_states[toggle_key]: st.session_state.show_wording_states[toggle_key] = show_wording; st.rerun()
+                                                toggle_key = f"toggle_wording_{base_key}"; show_wording = st.toggle("Show Wording", key=toggle_key, value=st.session_state.show_wording_states.get(toggle_key, False), help="Show/hide the exact clause wording extracted by the AI.")
+                                                # Check if toggle state changed
+                                                if show_wording != st.session_state.show_wording_states.get(toggle_key, False):
+                                                    st.session_state.show_wording_states[toggle_key] = show_wording
+                                                    st.rerun() # Rerun needed to show/hide text area
                                         if st.session_state.show_wording_states.get(f"toggle_wording_{base_key}", False): st.text_area(f"AI Extracted Wording for '{clause_ref}':", value=clause_wording, height=150, disabled=True, key=f"wording_area_{base_key}")
-                                        st.markdown("---")
+                                        st.markdown("---") # Separator after each evidence item
                                 else: st.markdown("**Evidence:** None provided.")
-                                st.markdown("---"); st.markdown("**Answer Justification:**")
+                                st.markdown("---", key=f"sep_just_{category}_{q_num}_{index}"); st.markdown("**Answer Justification:**") # Unique key for separator
                                 justification_text = result_item.get('Answer Justification', ''); just_key = f"justification_{category}_{q_num}_{index}"
                                 st.text_area(label="Justification Text Area", value=justification_text, height=100, disabled=True, label_visibility="collapsed", key=just_key)
             else: st.warning("Analysis generated results, but they could not be grouped by category. Displaying raw list."); st.json(results_list)
 
-            # --- Excel Download ---
+            # --- Excel Download (Now always in sidebar, but button logic here) ---
             st.sidebar.markdown("---"); st.sidebar.markdown("## Export Results")
+            # Button to trigger preparation
             if st.sidebar.button("Prepare Data for Excel Download", key="prep_excel", use_container_width=True):
                 st.session_state.excel_data = None; excel_prep_status = st.sidebar.empty(); excel_prep_status.info("Preparing Excel data...")
                 try:
                     excel_rows = [];
                     for item in results_list:
                         references = []; first_search_text = "N/A"; evidence = item.get("Evidence")
+                        # Determine File Name and Generation Time for this row
+                        # If viewing history, use the stored values, otherwise use the values added during analysis
+                        file_name_for_excel = st.session_state.history_filename if st.session_state.viewing_history else item.get("File Name", "")
+                        gen_time_for_excel = st.session_state.history_timestamp if st.session_state.viewing_history else item.get("Generation Time", "")
+
                         if evidence:
                             for i, ev in enumerate(evidence):
                                 if isinstance(ev, dict): references.append(str(ev.get("Clause Reference", "N/A")));
                                 if i == 0 and isinstance(ev, dict): first_search_text = ev.get("Searchable Clause Text", "N/A")
-                                else: references.append("[Invalid Evidence Item]") # Should not happen with valid AI response
-                        excel_row = {"File Name": item.get("File Name", ""), "Generation Time": item.get("Generation Time", ""), "Question Number": item.get("Question Number"), "Question Category": item.get("Question Category", "Uncategorized"), "Question": item.get("Question", "N/A"), "Answer": item.get("Answer", "N/A"), "Answer Justification": item.get("Answer Justification", "N/A"), "Clause References (Concatenated)": "; ".join(references) if references else "N/A", "First Searchable Clause Text": first_search_text}
+                                # Removed else clause which added "[Invalid Evidence Item]" - validation should prevent this
+
+                        excel_row = {
+                            "File Name": file_name_for_excel,
+                            "Generation Time": gen_time_for_excel,
+                            "Question Number": item.get("Question Number"),
+                            "Question Category": item.get("Question Category", "Uncategorized"),
+                            "Question": item.get("Question", "N/A"),
+                            "Answer": item.get("Answer", "N/A"),
+                            "Answer Justification": item.get("Answer Justification", "N/A"),
+                            "Clause References (Concatenated)": "; ".join(references) if references else "N/A",
+                            "First Searchable Clause Text": first_search_text
+                        }
                         excel_rows.append(excel_row)
+
                     if not excel_rows: excel_prep_status.warning("No data available to export."); st.session_state.excel_data = None
                     else:
                         df_excel = pd.DataFrame(excel_rows); final_columns = [col for col in EXCEL_COLUMN_ORDER if col in df_excel.columns]; extra_cols = [col for col in df_excel.columns if col not in final_columns]; df_excel = df_excel[final_columns + extra_cols]
@@ -542,18 +767,19 @@ if st.session_state.pdf_bytes is not None:
                         st.session_state.excel_data = output.getvalue(); excel_prep_status.success("✅ Excel file ready for download!"); time.sleep(2); excel_prep_status.empty()
                 except Exception as excel_err: excel_prep_status.error(f"Excel Prep Error: {excel_err}"); print(traceback.format_exc())
 
+            # Download button (only appears if data is ready)
             if st.session_state.excel_data:
-                current_filename = "analysis_results"
-                if st.session_state.analysis_results and isinstance(st.session_state.analysis_results, list) and len(st.session_state.analysis_results) > 0:
-                     first_result = st.session_state.analysis_results[0]
-                     if isinstance(first_result, dict) and "File Name" in first_result: current_filename = first_result["File Name"]
+                 # Use history filename if available, otherwise fallback to current run's name
+                current_filename = st.session_state.history_filename if st.session_state.viewing_history else st.session_state.get("current_filename", "analysis_results")
                 safe_base_name = re.sub(r'[^\w\s-]', '', os.path.splitext(current_filename)[0]).strip().replace(' ', '_'); download_filename = f"Analysis_{safe_base_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                 st.sidebar.download_button(label="📥 Download Results as Excel", data=st.session_state.excel_data, file_name=download_filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_excel_final", use_container_width=True)
 
         # --- Fallback messages within Col 1 ---
         elif st.session_state.analysis_complete and not st.session_state.analysis_results: st.info("Analysis process completed, but no valid results were generated. Check the run summary above for potential issues.")
         elif st.session_state.processing_in_progress: st.info("Analysis is currently in progress...")
-        elif not st.session_state.analysis_complete and st.session_state.pdf_bytes is not None: st.info("PDF loaded. Select sections and click 'Analyse Document' in the sidebar to start.")
+        elif not st.session_state.analysis_complete and st.session_state.pdf_bytes is not None and not st.session_state.viewing_history: st.info("PDF loaded. Select sections and click 'Analyse Document' in the sidebar to start.")
+        elif not st.session_state.pdf_bytes and not st.session_state.viewing_history: st.info("⬆️ Upload a PDF file or load from history.") # Initial state message
+
 
     # --- Column 2: PDF Viewer (Sticky) ---
     with col2:
@@ -571,11 +797,15 @@ if st.session_state.pdf_bytes is not None:
 
         if st.session_state.pdf_display_ready:
             try:
+                # Use tempfile for fitz if bytes cause issues, but bytes usually work
                 with fitz.open(stream=st.session_state.pdf_bytes, filetype="pdf") as doc: total_pages = doc.page_count
             except Exception as pdf_load_err: st.error(f"Error loading PDF for page count: {pdf_load_err}"); total_pages = 1; st.session_state.current_page = 1
 
+            # Ensure current page is valid after potential changes (like loading history)
             current_display_page = max(1, min(int(st.session_state.get('current_page', 1)), total_pages))
-            if current_display_page != st.session_state.get('current_page'): st.session_state.current_page = current_display_page
+            if current_display_page != st.session_state.get('current_page'):
+                 st.session_state.current_page = current_display_page
+                 # No rerun here, just update the state for rendering
 
             nav_cols = st.columns([1, 3, 1])
             with nav_cols[0]:
@@ -597,30 +827,40 @@ if st.session_state.pdf_bytes is not None:
                     is_current = (p_num == current_display_page)
                     if btn_cols[col_idx].button(f"Page {p_num}", key=f"jump_{p_num}_{search_context_ref}", disabled=is_current, use_container_width=True):
                         st.session_state.current_page = p_num; new_instances = next((inst for pg, inst in multi_findings if pg == p_num), None)
-                        st.session_state.last_search_result['instances'] = new_instances; st.session_state.last_search_result['page'] = p_num; st.rerun()
+                        # Update last_search_result correctly for the new page
+                        st.session_state.last_search_result['instances'] = new_instances
+                        st.session_state.last_search_result['page'] = p_num
+                        # Ensure status message reflects the jump, not the multi-match warning anymore
+                        term_desc = st.session_state.last_search_result.get('term', 'text')
+                        st.session_state.last_search_result['status'] = f"✅ Viewing match for '{term_desc}' on page {p_num}."
+                        st.session_state.last_search_result['all_findings'] = None # Clear multi-findings after jump
+                        st.rerun()
 
             st.markdown("---")
             highlights_to_apply = None; render_status_override = None
             if st.session_state.last_search_result and st.session_state.last_search_result.get('page') == current_display_page:
                 highlights_to_apply = st.session_state.last_search_result.get('instances')
-                if not st.session_state.last_search_result.get('all_findings'): render_status_override = st.session_state.last_search_result.get('status')
+                # Don't override status if we just jumped from multi-match
+                if not st.session_state.last_search_result.get('all_findings') or not all_findings:
+                    render_status_override = st.session_state.last_search_result.get('status')
 
             image_bytes, render_status = render_pdf_page_to_image(st.session_state.pdf_bytes, current_display_page, highlight_instances=highlights_to_apply, dpi=150)
 
             if image_bytes:
                 st.image(image_bytes, caption=f"Page {current_display_page} - View", use_container_width=True) # Use container width
                 final_status = render_status_override if render_status_override else render_status
-                if not (st.session_state.last_search_result and st.session_state.last_search_result.get('all_findings')):
+                # Only show status if not in multi-match jump list mode OR if override exists
+                if not (st.session_state.last_search_result and st.session_state.last_search_result.get('all_findings') and not render_status_override):
                     if final_status:
                         if "✅" in final_status or "✨" in final_status or "Found" in final_status : viewer_status_placeholder.success(final_status)
-                        elif "⚠️" in final_status or "warning" in final_status.lower(): viewer_status_placeholder.warning(final_status)
+                        elif "⚠️" in final_status or "warning" in final_status.lower() or "multiple pages" in final_status.lower(): viewer_status_placeholder.warning(final_status)
                         elif "❌" in final_status or "error" in final_status.lower(): viewer_status_placeholder.error(final_status)
                         else: viewer_status_placeholder.caption(final_status)
-                    else: viewer_status_placeholder.empty()
+                    else: viewer_status_placeholder.empty() # Clear status if none applies
             else: viewer_status_placeholder.error(f"Failed to render page {current_display_page}. {render_status or ''}")
         else: st.info("PDF loaded, preparing viewer..."); viewer_status_placeholder.empty()
         st.markdown('</div>', unsafe_allow_html=True) # Sticky wrapper end
 
-# --- Fallback messages if no PDF is loaded ---
-elif not st.session_state.pdf_bytes:
-     st.info("⬆️ Upload a PDF file using the sidebar to begin.")
+# --- Fallback message if no PDF loaded (and not viewing history) ---
+elif not st.session_state.pdf_bytes and not st.session_state.viewing_history:
+     st.info("⬆️ Upload a PDF file using the sidebar to begin, or load an analysis from the History page.")
