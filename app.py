@@ -85,13 +85,13 @@ EXCEL_COLUMN_ORDER = [ "File Name", "Generation Time", "Question Number", "Quest
 # Ensure these match the questions in your prompt
 SECTIONS_TO_RUN = {
     "agreement_details": (1, 4),
-    "eligibility_part_1": (5, 20),
-    "eligibility_part_2": (21, 34),
-    "eligibility_summary": (35, 36), # Example: combine adjacent small categories if needed
-    "confidentiality": (37, 63),
-    "additional_borrowers": (64, 66),
-    "interest_rate_provisions": (67, 71),
-    "prepayment_fee": (72, 78)
+    # "eligibility_part_1": (5, 20),
+    # "eligibility_part_2": (21, 34),
+    # "eligibility_summary": (35, 36), # Example: combine adjacent small categories if needed
+    # "confidentiality": (37, 63),
+    # "additional_borrowers": (64, 66),
+    # "interest_rate_provisions": (67, 71),
+    # "prepayment_fee": (72, 78)
 }
 
 
