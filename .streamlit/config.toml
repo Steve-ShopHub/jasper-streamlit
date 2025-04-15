@@ -1,0 +1,8 @@
+# .streamlit/config.toml
+
+[theme]
+primaryColor="#401a83" # NatWest Purple
+backgroundColor="#ffffff" # White background
+secondaryBackgroundColor="#f0f2f6" # Light grey for widgets/expanders
+textColor="#31333F" # Dark text
+font="sans serif"

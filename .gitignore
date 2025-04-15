@@ -1,0 +1,20 @@
+# Python Virtual Environment
+venv/
+*.pyc
+__pycache__/
+*.env
+
+# Streamlit Secrets (Even if not used for API key now, good practice)
+.streamlit/secrets.toml
+
+# Temporary Uploads/Files
+temp_uploads/
+*.xlsx
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE files (optional)
+.idea/
+.vscode/
