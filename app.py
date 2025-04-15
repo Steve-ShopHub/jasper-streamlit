@@ -438,7 +438,6 @@ def find_text_in_pdf(_pdf_bytes, search_text):
         if doc: doc.close(); print(f"ERROR searching PDF: {e}\n{traceback.format_exc()}"); return None, None, None, f"❌ Error during PDF search: {e}", None
 
 
-@st.cache_data(show_spinner=False)
 def render_pdf_page_to_image(_pdf_bytes, page_number, highlight_instances=None, dpi=150):
     """Renders PDF page to PNG image bytes, applying highlights. Returns (image_bytes, status_msg)."""
     if not _pdf_bytes or page_number < 1:
