@@ -388,14 +388,31 @@ def find_text_in_pdf(_pdf_bytes, search_text):
     num_words = len(words)
     search_attempts = []
 
-    # --- Build Search Terms List (Prioritized) ---
-    if num_words >= SEARCH_PREFIX_MIN_WORDS and num_words > 5: term_10 = ' '.join(words[:10]); search_attempts.append({'term': term_10, 'desc': "first 10 words"})
-    if num_words >= SEARCH_PREFIX_MIN_WORDS: term_5 = ' '.join(words[:5]);
-    if not search_attempts or term_5 != search_attempts[0]['term']: search_attempts.append({'term': term_5, 'desc': "first 5 words"})
-    term_full = search_text_cleaned;
-    if term_full and not any(term_full == a['term'] for a in search_attempts): search_attempts.append({'term': term_full, 'desc': "full text"})
-    sentences = re.split(r'(?<=[.?!])\s+', term_full); term_sentence = sentences[0].strip() if sentences else ""
-    if len(term_sentence) >= SEARCH_FALLBACK_MIN_LENGTH and not any(term_sentence == a['term'] for a in search_attempts): search_attempts.append({'term': term_sentence, 'desc': "first sentence fallback"})
+# --- Build Search Terms List (Prioritized) ---
+    search_attempts = [] # Start with an empty list
+
+    # 1. First 10 words (only if enough words and significantly longer than 5)
+    if num_words >= SEARCH_PREFIX_MIN_WORDS and num_words > 5:
+        term_10 = ' '.join(words[:10])
+        search_attempts.append({'term': term_10, 'desc': "first 10 words"})
+
+    # 2. First 5 words (if enough words and different from term_10 if term_10 exists)
+    if num_words >= SEARCH_PREFIX_MIN_WORDS:
+        term_5 = ' '.join(words[:5])
+        # Check if search_attempts is empty OR if term_5 is different from the first term (term_10)
+        if not search_attempts or term_5 != search_attempts[0]['term']:
+            search_attempts.append({'term': term_5, 'desc': "first 5 words"})
+
+    # 3. Full text (if provided and different from shorter prefixes already added)
+    term_full = search_text_cleaned
+    if term_full and not any(term_full == a['term'] for a in search_attempts):
+        search_attempts.append({'term': term_full, 'desc': "full text"})
+
+    # 4. First sentence (fallback, if long enough and different from other terms)
+    sentences = re.split(r'(?<=[.?!])\s+', term_full)
+    term_sentence = sentences[0].strip() if sentences else ""
+    if len(term_sentence) >= SEARCH_FALLBACK_MIN_LENGTH and not any(term_sentence == a['term'] for a in search_attempts):
+        search_attempts.append({'term': term_sentence, 'desc': "first sentence fallback"})
 
     # --- Execute Search Attempts ---
     try:
