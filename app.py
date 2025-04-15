@@ -1,5 +1,5 @@
 # app.py
-# --- COMPLETE FILE (v7 - Added Context for Dependent Sections) ---
+# --- COMPLETE FILE (v8 - UI/UX Improv, AI Params, Steve Test, Logo) ---
 
 import streamlit as st
 import pandas as pd
@@ -22,6 +22,7 @@ import google.cloud.storage # <-- IMPORT GCS
 import google.oauth2.service_account
 from google.api_core.exceptions import NotFound # For GCS blob check
 import copy # Needed for deep copying results
+from PIL import Image # For Logo
 
 # --- 1. SET PAGE CONFIG (MUST BE FIRST st COMMAND) ---
 st.set_page_config(
@@ -34,6 +35,15 @@ st.set_page_config(
 # Make sure the top value aligns with Streamlit's header height (approx 50-60px)
 st.markdown("""
 <style>
+    /* Reduce vertical padding within expanders */
+    .st-emotion-cache-1hboirw, .st-emotion-cache-p729wp { /* Target expander content areas (may change with Streamlit versions) */
+        padding-top: 0.5rem !important;
+        padding-bottom: 0.5rem !important;
+    }
+    /* Reduce spacing between elements */
+     div[data-testid="stVerticalBlock"] > div[style*="gap: 1rem;"] { /* Target vertical blocks */
+        gap: 0.5rem !important; /* Reduce the gap */
+     }
     /* Define a class for the sticky container */
     .sticky-viewer-content {
         position: sticky;
@@ -69,16 +79,17 @@ except Exception as e:
     st.stop()
 
 # --- 2. Configuration & Setup ---
-MODEL_NAME = "gemini-2.5-pro-preview-03-25" # Using 1.5 Pro now
+MODEL_NAME = "gemini-1.5-pro-latest" # Using 1.5 Pro
 MAX_VALIDATION_RETRIES = 1
 RETRY_DELAY_SECONDS = 3
 PROMPT_FILE = "prompt.txt"
-LOGO_FILE = "jasper-logo-1.png" # Ensure this file exists if used later
+LOGO_FILE = "jasper-logo-1.png" # Ensure this file exists in the app directory
 SEARCH_FALLBACK_MIN_LENGTH = 20
 SEARCH_PREFIX_MIN_WORDS = 4
 
 # --- Get the absolute path to the directory containing app.py ---
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGO_PATH = os.path.join(APP_DIR, LOGO_FILE)
 
 # --- Load Prompt Text from File ---
 try:
@@ -120,6 +131,8 @@ ALL_SECTIONS = {
     "interest_rate_provisions": (67, 71),
     "prepayment_fee": (72, 78)
 }
+STEVE_TEST_SECTIONS = ["agreement_details", "interest_rate_provisions"]
+
 # --- Define Section Dependencies ---
 DEPENDENT_SECTIONS = {
     "eligibility_summary": ["eligibility_part_1", "eligibility_part_2"]
@@ -229,15 +242,21 @@ def validate_ai_data(data, section_name):
     else: return validated_data, issues_list
 
 
-def generate_section_analysis(section, uploaded_file_ref, status_placeholder, api_key_to_use):
-    """Generates analysis for a standard (non-dependent) section using a specific API key."""
+def generate_section_analysis(section, uploaded_file_ref, status_placeholder, api_key_to_use, gen_config_params):
+    """Generates analysis for a standard (non-dependent) section using a specific API key and generation config."""
     try: genai.configure(api_key=api_key_to_use)
     except Exception as config_err: status_placeholder.error(f"❌ Invalid API Key provided or configuration failed: {config_err}"); return None, "Failed", [f"Invalid API Key or config error: {config_err}"]
     status_placeholder.info(f"🔄 Starting Analysis: {section}..."); section_warnings = []
     try:
         model = genai.GenerativeModel(model_name=MODEL_NAME, system_instruction=system_instruction_text)
-        # Ensure schema is passed correctly for standard sections
-        generation_config = types.GenerationConfig(response_mime_type="application/json", response_schema=ai_response_schema_dict, temperature=0.0,)
+        # Ensure schema is passed correctly, add user-defined params
+        generation_config = types.GenerationConfig(
+            response_mime_type="application/json",
+            response_schema=ai_response_schema_dict,
+            temperature=gen_config_params['temperature'],
+            top_p=gen_config_params['top_p'],
+            top_k=gen_config_params['top_k']
+        )
         safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
         final_validated_data = None
         for attempt in range(1, MAX_VALIDATION_RETRIES + 2):
@@ -304,7 +323,7 @@ def format_results_for_summary(prerequisite_results_map):
             context_str += "--- End Context ---\n"
     return context_str
 
-def generate_summary_with_context(section, prerequisite_results_map, uploaded_file_ref, status_placeholder, api_key_to_use):
+def generate_summary_with_context(section, prerequisite_results_map, uploaded_file_ref, status_placeholder, api_key_to_use, gen_config_params):
     """Generates analysis for a dependent section, injecting context from prerequisites."""
     try: genai.configure(api_key=api_key_to_use)
     except Exception as config_err: status_placeholder.error(f"❌ Invalid API Key provided or configuration failed: {config_err}"); return None, "Failed", [f"Invalid API Key or config error: {config_err}"]
@@ -312,7 +331,13 @@ def generate_summary_with_context(section, prerequisite_results_map, uploaded_fi
     try:
         model = genai.GenerativeModel(model_name=MODEL_NAME, system_instruction=system_instruction_text)
         # Schema still needed for the output of the summary section itself
-        generation_config = types.GenerationConfig(response_mime_type="application/json", response_schema=ai_response_schema_dict, temperature=0.0,)
+        generation_config = types.GenerationConfig(
+            response_mime_type="application/json",
+            response_schema=ai_response_schema_dict,
+            temperature=gen_config_params['temperature'],
+            top_p=gen_config_params['top_p'],
+            top_k=gen_config_params['top_k']
+        )
         safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
         final_validated_data = None
 
@@ -490,52 +515,71 @@ def download_from_gcs(bucket_name, source_blob_name):
 
 def reset_app_state():
     """Resets the session state for a new analysis or clearing history."""
-    st.session_state.pdf_bytes = None
-    st.session_state.pdf_display_ready = False
-    st.session_state.analysis_results = None
-    st.session_state.analysis_complete = False
-    st.session_state.processing_in_progress = False
-    st.session_state.current_page = 1
-    st.session_state.run_status_summary = []
-    st.session_state.excel_data = None
-    st.session_state.search_trigger = None
-    st.session_state.last_search_result = None
-    st.session_state.show_wording_states = defaultdict(bool)
-    st.session_state.viewing_history = False # Ensure history view is exited
-    st.session_state.history_filename = None
-    st.session_state.history_timestamp = None
-    st.session_state.current_filename = None # Clear current filename too
-    # Keep API key and selected sections if user wants to run again
-    # st.session_state.api_key = None # Optionally clear API key
-    # st.session_state.selected_sections_to_run = list(ALL_SECTIONS.keys())[:1] # Reset sections?
+    # Preserve API key and AI params across resets (unless explicitly cleared elsewhere)
+    current_api_key = st.session_state.get('api_key', None)
+    current_temp = st.session_state.get('ai_temperature', 0.2)
+    current_top_p = st.session_state.get('ai_top_p', 0.95)
+    current_top_k = st.session_state.get('ai_top_k', 40)
+    current_steve_mode = st.session_state.get('steve_test_mode', False)
+
+    # Clear most state variables
+    keys_to_reset = [
+        'pdf_bytes', 'pdf_display_ready', 'analysis_results', 'analysis_complete',
+        'processing_in_progress', 'current_page', 'run_status_summary',
+        'excel_data', 'search_trigger', 'last_search_result', 'show_wording_states',
+        'viewing_history', 'history_filename', 'history_timestamp', 'current_filename',
+        'load_history_id', 'run_key' # Also reset run_key? Maybe not needed if preserving settings. Let's reset it.
+    ]
+    for key in keys_to_reset:
+        if key in st.session_state:
+            del st.session_state[key] # Remove to allow reinitialization with defaults
+
+    # Re-initialize with defaults (or preserved values)
+    initialize_session_state()
+
+    # Restore preserved values
+    st.session_state.api_key = current_api_key
+    st.session_state.ai_temperature = current_temp
+    st.session_state.ai_top_p = current_top_p
+    st.session_state.ai_top_k = current_top_k
+    st.session_state.steve_test_mode = current_steve_mode
+
 
 # --- 4. Initialize Session State ---
-# (Initialize state variables only if they don't exist)
-state_defaults = {
-    'show_wording_states': defaultdict(bool),
-    'current_page': 1,
-    'analysis_results': None,
-    'pdf_bytes': None,
-    'pdf_display_ready': False,
-    'processing_in_progress': False,
-    'analysis_complete': False,
-    'run_key': 0,
-    'run_status_summary': [],
-    'excel_data': None,
-    'search_trigger': None,
-    'last_search_result': None,
-    'api_key': None,
-    'selected_sections_to_run': list(ALL_SECTIONS.keys())[:1], # Default to first section
-    'load_history_id': None,
-    'viewing_history': False,
-    'history_filename': None,
-    'history_timestamp': None,
-    'current_filename': None
-}
-for key, default_value in state_defaults.items():
-    if key not in st.session_state:
-        # Use deepcopy for mutable defaults like defaultdict
-        st.session_state[key] = copy.deepcopy(default_value) if isinstance(default_value, (dict, list, set, defaultdict)) else default_value
+def initialize_session_state():
+    """Initializes session state variables if they don't exist."""
+    state_defaults = {
+        'show_wording_states': defaultdict(bool),
+        'current_page': 1,
+        'analysis_results': None,
+        'pdf_bytes': None,
+        'pdf_display_ready': False,
+        'processing_in_progress': False,
+        'analysis_complete': False,
+        'run_key': 0,
+        'run_status_summary': [],
+        'excel_data': None,
+        'search_trigger': None,
+        'last_search_result': None,
+        'api_key': None,
+        # 'selected_sections_to_run': list(ALL_SECTIONS.keys())[:1], # Default to first section # No longer used directly
+        'load_history_id': None,
+        'viewing_history': False,
+        'history_filename': None,
+        'history_timestamp': None,
+        'current_filename': None,
+        'steve_test_mode': False, # New: Steve Test Mode toggle state
+        'ai_temperature': 0.2, # New: AI Temperature
+        'ai_top_p': 0.95,      # New: AI Top-P
+        'ai_top_k': 40         # New: AI Top-K
+    }
+    for key, default_value in state_defaults.items():
+        if key not in st.session_state:
+            # Use deepcopy for mutable defaults like defaultdict
+            st.session_state[key] = copy.deepcopy(default_value) if isinstance(default_value, (dict, list, set, defaultdict)) else default_value
+
+# --- Call Initialization ---
+initialize_session_state()
 
 
 # --- 5. Load History Data (if triggered) ---
@@ -572,7 +616,8 @@ if st.session_state.load_history_id:
                     pdf_bytes_from_hist = download_from_gcs(hist_bucket_name, hist_blob_name)
 
                 if pdf_bytes_from_hist:
-                    # Reset state before loading historical data
+                    # Reset state before loading historical data BUT preserve some settings
+                    # We call reset_app_state which now preserves API key/AI params
                     reset_app_state()
 
                     # Load historical data into session state
@@ -604,76 +649,105 @@ if st.session_state.load_history_id:
 
 
 # --- 6. Streamlit UI Logic ---
-st.title("JASPER - Just A Smart Platform for Extraction and Review")
 
-# --- Display History Mode Banner ---
+# --- Sidebar Setup ---
+st.sidebar.title("Controls")
+
+# --- Add Logo ---
+if os.path.exists(LOGO_PATH):
+    try:
+        logo = Image.open(LOGO_PATH)
+        st.sidebar.image(logo, use_column_width=True)
+    except Exception as img_err:
+        st.sidebar.warning(f"Could not load logo: {img_err}")
+else:
+    st.sidebar.warning(f"Logo file '{LOGO_FILE}' not found.")
+
+st.sidebar.markdown("---") # Separator after logo
+
+# --- Display History Mode Banner / Title ---
 if st.session_state.viewing_history:
     hist_ts_str = st.session_state.history_timestamp or "N/A"
+    st.title("JASPER - Historical Analysis Review")
     st.info(f"📜 **Viewing Historical Analysis:** File: **{st.session_state.history_filename}** (Generated: {hist_ts_str})")
     if st.button("⬅️ Exit History View / Start New Analysis", key="clear_history_view"):
         reset_app_state()
         st.rerun()
     st.markdown("---") # Separator
 
-elif not st.session_state.analysis_complete: # Only show initial message if not viewing history and not complete
-    st.markdown("Upload a PDF agreement, **enter your Gemini API Key**, **select sections**, click 'Analyse'. Results grouped below. Click clause references to view & highlight.")
+else: # Not viewing history
+    st.title("JASPER - Just A Smart Platform for Extraction and Review")
+    if not st.session_state.analysis_complete:
+        st.markdown("Upload a PDF agreement, enter your Gemini API Key, adjust settings, click 'Analyse'. Results grouped below. Click clause references to view & highlight.")
 
-# --- Sidebar Setup ---
-st.sidebar.markdown("## Controls")
-
-# --- Conditional Controls (Only show if NOT viewing history) ---
-if not st.session_state.viewing_history:
-    st.sidebar.markdown("### 1. API Key")
+    # --- Conditional Controls (Only show if NOT viewing history) ---
+    st.sidebar.markdown("### 1. Analysis Setup")
     # --- API Key Input (in Sidebar) ---
     api_key_input = st.sidebar.text_input("Enter your Google AI Gemini API Key", type="password", key="api_key_input", help="Your API key is used only for this session and is not stored.", value=st.session_state.get("api_key", ""))
-    # Update session state only if the input changes
     if api_key_input and api_key_input != st.session_state.api_key:
         st.session_state.api_key = api_key_input
-        # No rerun needed just for key change, wait for analysis button
 
     if not st.session_state.api_key and not st.session_state.analysis_complete and not st.session_state.processing_in_progress : st.sidebar.warning("API Key required to run analysis.", icon="🔑")
 
-    st.sidebar.markdown("### 2. Upload PDF")
     # --- File Upload (in Sidebar) ---
-    # Increment run_key ONLY when triggering analysis, not just for file upload view state
     uploaded_file_obj = st.sidebar.file_uploader("Upload Facility Agreement PDF", type="pdf", key=f"pdf_uploader_{st.session_state.get('run_key', 0)}")
     if uploaded_file_obj is not None:
         new_file_bytes = uploaded_file_obj.getvalue()
-        # Check if it's genuinely a new file or just a widget refresh
         if new_file_bytes != st.session_state.get('pdf_bytes'):
-             # Reset state completely when a new file is uploaded
-            current_api_key_before_reset = st.session_state.api_key # Preserve API key
-            current_sections_before_reset = st.session_state.selected_sections_to_run # Preserve sections
-            reset_app_state()
+            reset_app_state() # Reset state but preserves API key/AI params
             st.session_state.pdf_bytes = new_file_bytes
             st.session_state.pdf_display_ready = True
-            st.session_state.current_filename = uploaded_file_obj.name # Store the name of the newly uploaded file
-            # Restore API key and section selection
-            st.session_state.api_key = current_api_key_before_reset
-            st.session_state.selected_sections_to_run = current_sections_before_reset
-
+            st.session_state.current_filename = uploaded_file_obj.name
             st.toast("✅ New PDF file loaded. Viewer ready.", icon="📄")
-            st.rerun() # Rerun to update viewer and button states
+            st.rerun()
     elif not st.session_state.pdf_bytes:
          st.sidebar.info("Upload a PDF to enable analysis.")
 
+    st.sidebar.markdown("### 2. Analysis Options")
 
-    st.sidebar.markdown("### 3. Select Sections")
-    # --- Section Selection for Analysis (NEW) ---
-    selected_sections = st.sidebar.multiselect("Choose sections:", options=list(ALL_SECTIONS.keys()), default=st.session_state.selected_sections_to_run, key="section_selector", help="Select which parts of the document you want to analyse in this run.")
-    # Update session state if selection changes
-    if selected_sections != st.session_state.selected_sections_to_run:
-        st.session_state.selected_sections_to_run = selected_sections
-        # No rerun needed just for selection change
+    # --- Steve Test Mode Toggle ---
+    st.sidebar.toggle("⚡ Steve Test Mode (Fast Analysis)", key="steve_test_mode", value=st.session_state.steve_test_mode, help="Run only Agreement Details and Interest Rate questions for quick testing.")
 
-    st.sidebar.markdown("### 4. Run Analysis")
+    # --- Section Selection (Commented Out) ---
+    # selected_sections = st.sidebar.multiselect("Choose sections:", options=list(ALL_SECTIONS.keys()), default=st.session_state.selected_sections_to_run, key="section_selector", help="Select which parts of the document you want to analyse in this run.")
+    # if selected_sections != st.session_state.selected_sections_to_run:
+    #     st.session_state.selected_sections_to_run = selected_sections
+
+    # --- AI Parameter Controls ---
+    with st.sidebar.expander("Advanced AI Settings"):
+        st.session_state.ai_temperature = st.slider(
+            "Temperature", min_value=0.0, max_value=1.0, step=0.05,
+            value=st.session_state.ai_temperature,
+            help="Controls randomness. Lower values (e.g., 0.1) make output more deterministic, higher values (e.g., 0.8) make it more creative."
+        )
+        st.session_state.ai_top_p = st.slider(
+            "Top-P", min_value=0.0, max_value=1.0, step=0.05,
+            value=st.session_state.ai_top_p,
+            help="Nucleus sampling. Considers only the smallest set of tokens whose cumulative probability exceeds P. (e.g., 0.95)"
+        )
+        st.session_state.ai_top_k = st.number_input(
+            "Top-K", min_value=1, step=1,
+            value=st.session_state.ai_top_k,
+            help="Considers only the top K most likely tokens at each step. (e.g., 40)"
+        )
+
+
+    st.sidebar.markdown("### 3. Run Analysis")
     # --- Analysis Trigger (in Sidebar) ---
-    can_analyse = (st.session_state.pdf_bytes is not None and st.session_state.api_key is not None and not st.session_state.processing_in_progress and not st.session_state.analysis_complete and st.session_state.selected_sections_to_run)
-    analyse_button_tooltip = "Analysis complete for the current file." if st.session_state.analysis_complete else "Analysis is currently running." if st.session_state.processing_in_progress else "Upload a PDF file first." if not st.session_state.pdf_bytes else "Enter your Gemini API key first." if not st.session_state.api_key else "Select at least one section to analyse." if not st.session_state.selected_sections_to_run else "Start analyzing the selected sections"
+    # Determine sections to run based on Steve Test Mode
+    sections_to_run_if_clicked = STEVE_TEST_SECTIONS if st.session_state.steve_test_mode else list(ALL_SECTIONS.keys())
+
+    can_analyse = (st.session_state.pdf_bytes is not None and st.session_state.api_key is not None and not st.session_state.processing_in_progress and not st.session_state.analysis_complete and sections_to_run_if_clicked)
+    analyse_button_tooltip = "Analysis complete for the current file." if st.session_state.analysis_complete else \
+                             "Analysis is currently running." if st.session_state.processing_in_progress else \
+                             "Upload a PDF file first." if not st.session_state.pdf_bytes else \
+                             "Enter your Gemini API key first." if not st.session_state.api_key else \
+                             "Start analyzing the document" # Removed section check as Steve Test handles it
+
     if st.sidebar.button("✨ Analyse Document", key="analyse_button", disabled=not can_analyse, help=analyse_button_tooltip, use_container_width=True, type="primary"):
         if not st.session_state.api_key: st.error("API Key is missing. Please enter it in the sidebar.")
         elif not st.session_state.pdf_bytes: st.error("No PDF file uploaded. Please upload a file.")
-        elif not st.session_state.selected_sections_to_run: st.error("No sections selected for analysis. Please select sections in the sidebar.")
+        # elif not sections_to_run_if_clicked: st.error("No sections selected for analysis (Internal Error).") # Should not happen
         else:
             # --- Start Analysis Process ---
             st.session_state.processing_in_progress = True
@@ -687,12 +761,17 @@ if not st.session_state.viewing_history:
             st.session_state.show_wording_states = defaultdict(bool) # Reset toggles
 
             current_api_key = st.session_state.api_key
+            # Get AI parameters from session state
+            current_gen_config_params = {
+                'temperature': st.session_state.ai_temperature,
+                'top_p': st.session_state.ai_top_p,
+                'top_k': st.session_state.ai_top_k
+            }
+
             run_start_time = datetime.now()
             run_timestamp_str = run_start_time.strftime("%Y-%m-%d %H:%M:%S")
 
-            # Ensure current_filename is set (should be from upload or history load)
             if not st.session_state.current_filename:
-                 # Fallback if somehow filename wasn't captured (should not happen)
                  st.session_state.current_filename = f"analysis_{run_start_time.strftime('%Y%m%d%H%M%S')}.pdf"
                  st.warning("Could not determine original filename, using generated name.")
             base_file_name = st.session_state.current_filename
@@ -706,7 +785,6 @@ if not st.session_state.viewing_history:
 
             temp_dir = "temp_uploads"
             safe_base_name = re.sub(r'[^\w\-.]', '_', base_file_name)
-            # Use run_key for unique temp file name within this run
             temp_file_path = os.path.join(APP_DIR, temp_dir, f"{st.session_state.run_key}_{safe_base_name}")
             os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
 
@@ -732,7 +810,8 @@ if not st.session_state.viewing_history:
                 progress_bar.progress(15, text="File uploaded. Starting section analysis...")
 
                 # --- Analysis Loop (Two Passes) ---
-                selected_sections_to_run = st.session_state.selected_sections_to_run
+                # Use the sections determined before clicking the button
+                selected_sections_to_run = sections_to_run_if_clicked
                 processed_sections = set()
                 sections_to_process_pass1 = []
                 sections_to_process_pass2 = []
@@ -740,38 +819,43 @@ if not st.session_state.viewing_history:
                 # Identify independent and dependent sections
                 for section_name in selected_sections_to_run:
                     if section_name in DEPENDENT_SECTIONS:
-                        sections_to_process_pass2.append(section_name)
+                        # Check if prerequisites for this dependent section are also selected
+                        prereqs_selected = all(p in selected_sections_to_run for p in DEPENDENT_SECTIONS[section_name])
+                        if prereqs_selected:
+                            sections_to_process_pass2.append(section_name)
+                        else:
+                            st.warning(f"Skipping dependent section '{section_name}' because not all prerequisites ({DEPENDENT_SECTIONS[section_name]}) were selected.")
+                            st.session_state.run_status_summary.append({"section": section_name, "status": "Skipped", "warnings": ["Prerequisites not included in run."]})
                     else:
                         sections_to_process_pass1.append(section_name)
 
-                total_sections = len(selected_sections_to_run)
+                # Adjust total sections count for progress bar
+                total_sections = len(sections_to_process_pass1) + len(sections_to_process_pass2)
                 progress_per_section = (95 - 15) / total_sections if total_sections > 0 else 0
                 sections_completed_count = 0
 
                 # Pass 1: Independent Sections
-                status_text.info("🚀 Starting Pass 1: Independent Sections")
+                status_text.info(f"🚀 Starting Pass 1: Independent Sections ({len(sections_to_process_pass1)} sections)")
                 for section_name in sections_to_process_pass1:
                     if section_name not in ALL_SECTIONS: st.warning(f"Skipping invalid section '{section_name}' found in selection."); continue
                     current_progress = int(15 + (sections_completed_count * progress_per_section)); progress_bar.progress(current_progress, text=f"Analysing Section: {section_name}...")
-                    section_data, section_status, section_warnings = generate_section_analysis(section_name, gemini_uploaded_file_ref, status_text, current_api_key)
+                    section_data, section_status, section_warnings = generate_section_analysis(section_name, gemini_uploaded_file_ref, status_text, current_api_key, current_gen_config_params)
                     st.session_state.run_status_summary.append({"section": section_name, "status": section_status, "warnings": section_warnings})
 
                     if section_status == "Success" and section_data:
-                        # Add file name and timestamp to each item
                         for item in section_data: item["File Name"] = base_file_name; item["Generation Time"] = run_timestamp_str
-                        section_results_map[section_name] = section_data # Store results for context
-                        all_validated_data.extend(section_data) # Add to final list
+                        section_results_map[section_name] = section_data
+                        all_validated_data.extend(section_data)
                     else:
-                        section_results_map[section_name] = None # Mark as failed/no data
-                        overall_success = False # Mark run as having issues if any section fails
+                        section_results_map[section_name] = None
+                        overall_success = False
 
                     processed_sections.add(section_name)
                     sections_completed_count += 1
                     progress_bar.progress(int(15 + (sections_completed_count * progress_per_section)), text=f"Completed: {section_name}")
 
-
                 # Pass 2: Dependent Sections (e.g., Eligibility Summary)
-                status_text.info("🚀 Starting Pass 2: Dependent Sections")
+                status_text.info(f"🚀 Starting Pass 2: Dependent Sections ({len(sections_to_process_pass2)} sections)")
                 for section_name in sections_to_process_pass2:
                     if section_name not in ALL_SECTIONS: st.warning(f"Skipping invalid dependent section '{section_name}' found."); continue
                     if section_name in processed_sections: continue # Skip if somehow already processed
@@ -780,39 +864,30 @@ if not st.session_state.viewing_history:
                     prereqs_met = True
                     prerequisite_results_for_context = {}
 
-                    # Check if prerequisites were selected and ran successfully
+                    # Check if prerequisites ran successfully (they must have been selected to reach here)
                     for prereq_section in prerequisites:
-                        if prereq_section not in selected_sections_to_run:
-                            st.warning(f"Skipping '{section_name}' because prerequisite section '{prereq_section}' was not selected.")
-                            st.session_state.run_status_summary.append({"section": section_name, "status": "Skipped", "warnings": [f"Prerequisite '{prereq_section}' not selected."]})
-                            prereqs_met = False; break
                         if prereq_section not in section_results_map or section_results_map[prereq_section] is None:
                             st.warning(f"Skipping '{section_name}' because prerequisite section '{prereq_section}' failed or produced no data.")
                             st.session_state.run_status_summary.append({"section": section_name, "status": "Skipped", "warnings": [f"Prerequisite '{prereq_section}' failed or missing."]})
                             prereqs_met = False; break
-                        # If prerequisite met, add its results to the context map
                         prerequisite_results_for_context[prereq_section] = section_results_map[prereq_section]
 
                     if not prereqs_met:
-                        overall_success = False # Mark as failed if dependent section skipped
-                        # Need to account for skipped section in progress bar?
-                        # Maybe just jump progress - simpler for now.
-                        sections_completed_count += 1
+                        overall_success = False
+                        sections_completed_count += 1 # Still count skipped for progress
                         progress_bar.progress(int(15 + (sections_completed_count * progress_per_section)), text=f"Skipped: {section_name}")
-                        continue # Move to the next dependent section
+                        continue
 
-                    # Prerequisites are met, proceed with context-aware generation
+                    # Prerequisites met, proceed with context-aware generation
                     current_progress = int(15 + (sections_completed_count * progress_per_section)); progress_bar.progress(current_progress, text=f"Analysing Summary: {section_name}...")
-                    section_data, section_status, section_warnings = generate_summary_with_context(section_name, prerequisite_results_for_context, gemini_uploaded_file_ref, status_text, current_api_key)
+                    section_data, section_status, section_warnings = generate_summary_with_context(section_name, prerequisite_results_for_context, gemini_uploaded_file_ref, status_text, current_api_key, current_gen_config_params)
                     st.session_state.run_status_summary.append({"section": section_name, "status": section_status, "warnings": section_warnings})
 
                     if section_status == "Success" and section_data:
-                        # Add file name and timestamp
                         for item in section_data: item["File Name"] = base_file_name; item["Generation Time"] = run_timestamp_str
-                        # Don't add to section_results_map as it's not a prerequisite for others (currently)
                         all_validated_data.extend(section_data)
                     else:
-                        overall_success = False # Mark run as having issues
+                        overall_success = False
 
                     processed_sections.add(section_name)
                     sections_completed_count += 1
@@ -826,27 +901,21 @@ if not st.session_state.viewing_history:
                 else: status_text.error("🏁 Analysis finished, but failed to generate any valid results.")
                 st.session_state.analysis_complete = True
 
-
-                # --- Save to GCS and Firestore (if analysis produced results) ---
+                # --- Save to GCS and Firestore ---
                 if all_validated_data and st.session_state.pdf_bytes:
                     try:
                         timestamp = datetime.now()
-                        # Use Firestore auto-ID or construct a robust one
                         firestore_doc_id = f"{safe_base_name}_{timestamp.isoformat()}"
-                        gcs_blob_name = f"{GCS_PDF_FOLDER}/{firestore_doc_id}.pdf" # Link PDF name to Firestore doc ID
-
-                        # Upload PDF to GCS
+                        gcs_blob_name = f"{GCS_PDF_FOLDER}/{firestore_doc_id}.pdf"
                         gcs_file_path = upload_to_gcs(GCS_BUCKET_NAME, st.session_state.pdf_bytes, gcs_blob_name, status_text)
-
-                        # Save results and GCS path to Firestore
                         status_text.info("💾 Saving results and PDF reference to database...")
                         doc_ref = db.collection("analysis_runs").document(firestore_doc_id)
                         doc_ref.set({
                             "filename": base_file_name,
                             "analysis_timestamp": timestamp,
-                            "results": all_validated_data, # Store the combined results
-                            "run_status": st.session_state.run_status_summary, # Store run summary
-                            "gcs_pdf_path": gcs_file_path # Store the GCS path
+                            "results": all_validated_data,
+                            "run_status": st.session_state.run_status_summary,
+                            "gcs_pdf_path": gcs_file_path
                         })
                         status_text.success("💾 Results and PDF link saved successfully.")
                         time.sleep(1)
@@ -854,11 +923,9 @@ if not st.session_state.viewing_history:
                         st.error(f"❌ Failed to save results/PDF to cloud: {db_gcs_err}")
                         print(f"DB/GCS Save Error: {db_gcs_err}\n{traceback.format_exc()}")
                         st.session_state.run_status_summary.append({
-                            "section": "Cloud Save",
-                            "status": "Failed",
-                            "warnings": [f"Error saving to GCS/Firestore: {db_gcs_err}"]
-                        })
-                        overall_success = False # Mark overall as failed if save fails
+                            "section": "Cloud Save", "status": "Failed",
+                            "warnings": [f"Error saving to GCS/Firestore: {db_gcs_err}"]})
+                        overall_success = False
 
             except Exception as main_err:
                 st.error(f"❌ CRITICAL ERROR during analysis workflow: {main_err}"); print(traceback.format_exc())
@@ -876,13 +943,13 @@ if not st.session_state.viewing_history:
                     try: os.remove(temp_file_path)
                     except Exception as local_del_err: st.sidebar.warning(f"Local temp file cleanup issue: {local_del_err}", icon="⚠️"); print(f"WARN: Failed to delete local temp file {temp_file_path}: {local_del_err}")
 
-            # Rerun after analysis and cleanup to update UI
             st.rerun()
-else:
-    # If viewing history, show minimal sidebar info or placeholders
-    st.sidebar.info("📜 Viewing historical data.")
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("Click 'Exit History View' above to start a new analysis.")
+    # else for history mode
+    elif st.session_state.viewing_history:
+        # If viewing history, show minimal sidebar info or placeholders
+        st.sidebar.info("📜 Viewing historical data.")
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("Click 'Exit History View' above to start a new analysis.")
 
 
 # --- 7. Display Area (Results and PDF Viewer) ---
@@ -897,147 +964,147 @@ if st.session_state.pdf_bytes is not None:
             has_failures = any(s['status'] == "Failed" or "Error" in s['status'] or "Skipped" in s['status'] for s in st.session_state.run_status_summary)
             has_warnings = any(s['status'] != "Success" and not has_failures for s in st.session_state.run_status_summary)
 
-            if has_failures:
-                final_status = "❌ Failed / Skipped"
-            elif has_warnings:
-                final_status = "⚠️ Issues"
+            if has_failures: final_status = "❌ Failed / Skipped"
+            elif has_warnings: final_status = "⚠️ Issues"
 
-            # Expand summary if viewing history OR if there were issues/skips
             expand_summary = st.session_state.viewing_history or (final_status != "✅ Success")
             with st.expander(f"📊 Analysis Run Summary ({final_status})", expanded=expand_summary):
                 for item in st.session_state.run_status_summary:
-                    icon = "✅" if item['status'] == "Success" else "❌" if item['status'] == "Failed" or "Error" in item['status'] else "⚠️" if "Skipped" not in item['status'] else "➡️" # Icon for skipped
-                    status_text = item['status']
-                    if item['status'] == "Skipped": icon = "➡️" # Specific icon for skipped
-                    st.markdown(f"**{item['section']}**: {icon} {status_text}")
+                    icon = "✅" if item['status'] == "Success" else "❌" if item['status'] == "Failed" or "Error" in item['status'] else "⚠️" if "Skipped" not in item['status'] else "➡️"
+                    status_text_val = item['status']
+                    if item['status'] == "Skipped": icon = "➡️"
+                    st.markdown(f"**{item['section']}**: {icon} {status_text_val}")
                     if item['warnings']:
-                        # Filter out generic validation intro messages for cleaner display
                         filtered_warnings = [msg for msg in item['warnings'] if not (isinstance(msg, str) and msg.startswith("Validation Issues Found"))]
                         if filtered_warnings:
                             with st.container(): st.caption("Details:")
                             for msg in filtered_warnings:
-                                msg_str = str(msg);
-                                # Determine message type based on keywords
+                                msg_str = str(msg)
                                 if any(term in msg_str for term in ["CRITICAL", "Error", "Block", "Fail"]) and "permission" not in msg_str.lower(): st.error(f" L> {msg_str}")
                                 elif any(term in msg_str.lower() for term in ["warn", "missing", "unexpected", "empty list", "validation issue", "permission issue", "recitation", "max_tokens", "timeout"]): st.warning(f" L> {msg_str}")
-                                elif "Skipped" in status_text: st.info(f" L> {msg_str}") # Info for skip reasons
-                                else: st.caption(f" L> {msg_str}") # Default to caption
+                                elif "Skipped" in status_text_val: st.info(f" L> {msg_str}")
+                                else: st.caption(f" L> {msg_str}")
 
         st.subheader("Analysis Results")
 
-        # --- Display Results (if analysis complete/history loaded and results exist) ---
-        # Sort results primarily by Question Number for consistent display order
         if (st.session_state.analysis_complete or st.session_state.viewing_history) and st.session_state.analysis_results:
-            # Sort the flat list of results first
             try:
                 results_list = sorted(st.session_state.analysis_results, key=lambda x: x.get('Question Number', float('inf')))
             except Exception as sort_err:
                  st.warning(f"Could not sort results by question number: {sort_err}. Displaying in original order.")
                  results_list = st.session_state.analysis_results
 
-
-            # --- NEW: Scatter Plot Expander ---
+            # --- Scatter Plot Expander ---
+            # (Keep this as is, seems fine)
             try:
                 plot_data = []
-                for item in results_list: # Use sorted list
+                for item in results_list:
                     plot_data.append({
-                        'Question Number': item.get('Question Number', 0), # Default to 0 if missing
+                        'Question Number': item.get('Question Number', 0),
                         'Number of Evidence Items': len(item.get('Evidence', [])),
                         'Question Category': item.get('Question Category', 'Uncategorized'),
-                        'Question': item.get('Question', 'N/A') # For hover
+                        'Question': item.get('Question', 'N/A')
                     })
-
                 if plot_data:
                     df_plot = pd.DataFrame(plot_data)
                     with st.expander("📊 Evidence Count Analysis (Scatter Plot)", expanded=False):
-                        fig = px.scatter(
-                            df_plot,
-                            x='Question Number',
-                            y='Number of Evidence Items',
-                            color='Question Category',
-                            title="Number of Evidence Clauses Found per Question",
-                            labels={'Number of Evidence Items': 'Evidence Count'},
-                            hover_data=['Question'] # Show question text on hover
-                        )
+                        fig = px.scatter(df_plot, x='Question Number', y='Number of Evidence Items', color='Question Category',
+                                         title="Number of Evidence Clauses Found per Question", labels={'Number of Evidence Items': 'Evidence Count'},
+                                         hover_data=['Question'])
                         fig.update_traces(marker=dict(size=10, opacity=0.7), selector=dict(mode='markers'))
                         fig.update_layout(xaxis_title="Question Number", yaxis_title="Number of Evidence Clauses")
                         st.plotly_chart(fig, use_container_width=True)
                         st.caption("This plot shows how many separate evidence clauses the AI referenced for each question. Hover over points for question details.")
-
             except Exception as plot_err:
                  st.warning(f"Could not generate scatter plot: {plot_err}")
                  print(f"Plotting Error: {plot_err}\n{traceback.format_exc()}")
-            # --- END: Scatter Plot Expander ---
 
 
             # --- Tabbed Results Display ---
-            # Group sorted results by category
             grouped_results = defaultdict(list); categories_ordered = []
-            for item in results_list: # Iterate through the pre-sorted list
+            for item in results_list:
                 category = item.get("Question Category", "Uncategorized")
-                # Handle potential duplicate category names from different sections (e.g., "Eligibility")
-                # For simplicity, we'll still group by the name provided in the result.
-                # A more complex approach might map Q# ranges back to the original section name.
                 if category not in grouped_results: categories_ordered.append(category)
                 grouped_results[category].append(item)
 
-            # Create tabs based on the order categories were encountered in the sorted list
             if categories_ordered:
                 category_tabs = st.tabs(categories_ordered)
-
                 for i, category in enumerate(categories_ordered):
                     with category_tabs[i]:
-                        # Items within the category are already sorted by Q# from the initial sort
                         category_items = grouped_results[category]
                         for index, result_item in enumerate(category_items):
                             q_num = result_item.get('Question Number', 'N/A'); question_text = result_item.get('Question', 'N/A')
-                            # Expander doesn't need a key
-                            with st.expander(f"**Q{q_num}:** {question_text}"):
-                                st.markdown(f"**Answer:**"); st.markdown(f"> {result_item.get('Answer', 'N/A')}"); st.markdown("---")
+                            # --- NEW UI STRUCTURE within Expander ---
+                            expander_key = f"exp_{category}_{q_num}_{index}"
+                            with st.expander(f"**Q{q_num}:** {question_text}", key=expander_key):
+                                # Answer and Justification first
+                                st.markdown(f"**Answer:**")
+                                st.markdown(f"> {result_item.get('Answer', 'N/A')}") # Using blockquote for emphasis
+                                st.markdown("**Answer Justification:**")
+                                justification_text = result_item.get('Answer Justification', '')
+                                just_key = f"justification_{category}_{q_num}_{index}"
+                                st.text_area("Justification Text", value=justification_text, height=100, disabled=True, label_visibility="collapsed", key=just_key)
+                                st.markdown("---") # Separator before Evidence
+
+                                # Evidence section
                                 evidence_list = result_item.get('Evidence', [])
                                 if evidence_list:
                                     st.markdown("**Evidence:**")
-                                    for ev_index, evidence_item in enumerate(evidence_list):
-                                        clause_ref = evidence_item.get('Clause Reference', 'N/A'); search_text = evidence_item.get('Searchable Clause Text', None)
-                                        clause_wording = evidence_item.get('Clause Wording', 'N/A'); base_key = f"ev_{category}_{q_num}_{index}_{ev_index}" # Unique base for keys
-                                        ev_cols = st.columns([3, 1])
-                                        with ev_cols[0]:
-                                            if search_text:
-                                                button_key = f"search_btn_{base_key}"; button_label = f"Clause: **{clause_ref or 'Link'}** (Find & View)"
-                                                if st.button(button_label, key=button_key, help=f"Search for text related to '{clause_ref or 'this evidence'}' and view the page."):
-                                                    st.session_state.search_trigger = {'text': search_text, 'ref': clause_ref}; st.session_state.last_search_result = None; st.rerun()
-                                            elif clause_ref != 'N/A': st.markdown(f"- Clause: **{clause_ref}** (No searchable text provided by AI)")
-                                            else: st.caption("No clause reference provided.")
-                                        with ev_cols[1]:
-                                            if clause_wording != 'N/A':
-                                                toggle_key = f"toggle_wording_{base_key}"; show_wording = st.toggle("Show Wording", key=toggle_key, value=st.session_state.show_wording_states.get(toggle_key, False), help="Show/hide the exact clause wording extracted by the AI.")
-                                                # Check if toggle state changed
-                                                if show_wording != st.session_state.show_wording_states.get(toggle_key, False):
-                                                    st.session_state.show_wording_states[toggle_key] = show_wording
-                                                    st.rerun() # Rerun needed to show/hide text area
-                                        if st.session_state.show_wording_states.get(f"toggle_wording_{base_key}", False): st.text_area(f"AI Extracted Wording for '{clause_ref}':", value=clause_wording, height=150, disabled=True, key=f"wording_area_{base_key}")
-                                        st.markdown("---") # Separator after each evidence item
-                                else: st.markdown("**Evidence:** None provided.")
-                                # Separator and Justification (no key needed for markdown)
-                                st.markdown("---"); st.markdown("**Answer Justification:**")
-                                justification_text = result_item.get('Answer Justification', ''); just_key = f"justification_{category}_{q_num}_{index}"
-                                st.text_area(label="Justification Text Area", value=justification_text, height=100, disabled=True, label_visibility="collapsed", key=just_key)
+                                    # Use a container to group evidence items visually
+                                    with st.container():
+                                        for ev_index, evidence_item in enumerate(evidence_list):
+                                            clause_ref = evidence_item.get('Clause Reference', 'N/A')
+                                            search_text = evidence_item.get('Searchable Clause Text', None)
+                                            clause_wording = evidence_item.get('Clause Wording', 'N/A')
+                                            base_key = f"ev_{category}_{q_num}_{index}_{ev_index}" # Unique base for keys
+
+                                            # Use columns for button and toggle, keep tighter spacing
+                                            ev_cols = st.columns([3, 1])
+                                            with ev_cols[0]:
+                                                if search_text:
+                                                    button_key = f"search_btn_{base_key}"
+                                                    button_label = f"Clause: **{clause_ref or 'Link'}** (Find & View)"
+                                                    if st.button(button_label, key=button_key, help=f"Search for text related to '{clause_ref or 'this evidence'}' and view the page."):
+                                                        st.session_state.search_trigger = {'text': search_text, 'ref': clause_ref}
+                                                        st.session_state.last_search_result = None
+                                                        st.rerun()
+                                                elif clause_ref != 'N/A':
+                                                    st.markdown(f"- Clause: **{clause_ref}** (No searchable text provided by AI)")
+                                                else:
+                                                    st.caption("No clause reference provided.")
+
+                                            with ev_cols[1]:
+                                                if clause_wording != 'N/A':
+                                                    toggle_key = f"toggle_wording_{base_key}"
+                                                    show_wording = st.toggle("Show Wording", key=toggle_key, value=st.session_state.show_wording_states.get(toggle_key, False), help="Show/hide the exact clause wording extracted by the AI.")
+                                                    if show_wording != st.session_state.show_wording_states.get(toggle_key, False):
+                                                        st.session_state.show_wording_states[toggle_key] = show_wording
+                                                        st.rerun() # Rerun needed to show/hide text area
+
+                                            # Display wording area if toggled ON, directly below the toggle/button row
+                                            if st.session_state.show_wording_states.get(f"toggle_wording_{base_key}", False):
+                                                st.text_area(f"AI Extracted Wording for '{clause_ref}':", value=clause_wording, height=100, disabled=True, key=f"wording_area_{base_key}")
+
+                                            # Removed the "---" separator between individual evidence items for compactness
+                                            # Add a small vertical space instead if needed
+                                            if ev_index < len(evidence_list) - 1:
+                                                st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
+
+                                else:
+                                    st.markdown("**Evidence:** None provided.")
+                            # --- END NEW UI STRUCTURE ---
             else: st.warning("Analysis generated results, but they could not be grouped by category. Displaying raw list."); st.json(results_list)
 
-            # --- Excel Download (Now always in sidebar, but button logic here) ---
+            # --- Excel Download ---
             st.sidebar.markdown("---"); st.sidebar.markdown("## Export Results")
-            # Button to trigger preparation
             if st.sidebar.button("Prepare Data for Excel Download", key="prep_excel", use_container_width=True):
                 st.session_state.excel_data = None; excel_prep_status = st.sidebar.empty(); excel_prep_status.info("Preparing Excel data...")
                 try:
                     excel_rows = [];
-                    # Use the sorted results_list for Excel export as well
                     for item in results_list:
                         references = []; first_search_text = "N/A"; evidence = item.get("Evidence")
-                        # Determine File Name and Generation Time for this row
-                        # Use the main filename/timestamp for the whole run/history item
                         file_name_for_excel = st.session_state.history_filename if st.session_state.viewing_history else st.session_state.get("current_filename", "N/A")
-                        gen_time_for_excel = st.session_state.history_timestamp if st.session_state.viewing_history else item.get("Generation Time", "N/A") # Use first item's time if live? Or store overall start time?
+                        gen_time_for_excel = st.session_state.history_timestamp if st.session_state.viewing_history else item.get("Generation Time", "N/A")
 
                         if evidence:
                             for i, ev in enumerate(evidence):
@@ -1045,12 +1112,9 @@ if st.session_state.pdf_bytes is not None:
                                 if i == 0 and isinstance(ev, dict): first_search_text = ev.get("Searchable Clause Text", "N/A")
 
                         excel_row = {
-                            "File Name": file_name_for_excel,
-                            "Generation Time": gen_time_for_excel,
-                            "Question Number": item.get("Question Number"),
-                            "Question Category": item.get("Question Category", "Uncategorized"),
-                            "Question": item.get("Question", "N/A"),
-                            "Answer": item.get("Answer", "N/A"),
+                            "File Name": file_name_for_excel, "Generation Time": gen_time_for_excel,
+                            "Question Number": item.get("Question Number"), "Question Category": item.get("Question Category", "Uncategorized"),
+                            "Question": item.get("Question", "N/A"), "Answer": item.get("Answer", "N/A"),
                             "Answer Justification": item.get("Answer Justification", "N/A"),
                             "Clause References (Concatenated)": "; ".join(references) if references else "N/A",
                             "First Searchable Clause Text": first_search_text
@@ -1065,18 +1129,14 @@ if st.session_state.pdf_bytes is not None:
                         st.session_state.excel_data = output.getvalue(); excel_prep_status.success("✅ Excel file ready for download!"); time.sleep(2); excel_prep_status.empty()
                 except Exception as excel_err: excel_prep_status.error(f"Excel Prep Error: {excel_err}"); print(traceback.format_exc())
 
-            # Download button (only appears if data is ready)
             if st.session_state.excel_data:
-                 # Use history filename or current run's filename
                 current_filename_for_download = st.session_state.history_filename if st.session_state.viewing_history else st.session_state.get("current_filename", "analysis_results")
                 safe_base_name = re.sub(r'[^\w\s-]', '', os.path.splitext(current_filename_for_download)[0]).strip().replace(' ', '_'); download_filename = f"Analysis_{safe_base_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
                 st.sidebar.download_button(label="📥 Download Results as Excel", data=st.session_state.excel_data, file_name=download_filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="download_excel_final", use_container_width=True)
 
-        # --- Fallback messages within Col 1 ---
         elif st.session_state.analysis_complete and not st.session_state.analysis_results: st.info("Analysis process completed, but no valid results were generated. Check the run summary above for potential issues.")
         elif st.session_state.processing_in_progress: st.info("Analysis is currently in progress...")
-        elif not st.session_state.analysis_complete and st.session_state.pdf_bytes is not None and not st.session_state.viewing_history: st.info("PDF loaded. Select sections and click 'Analyse Document' in the sidebar to start.")
-        # Initial state message covered by banner logic now
+        elif not st.session_state.analysis_complete and st.session_state.pdf_bytes is not None and not st.session_state.viewing_history: st.info("PDF loaded. Adjust settings and click 'Analyse Document' in the sidebar to start.")
 
 
     # --- Column 2: PDF Viewer (Sticky) ---
@@ -1095,16 +1155,12 @@ if st.session_state.pdf_bytes is not None:
 
         if st.session_state.pdf_display_ready:
             try:
-                # Use tempfile for fitz if bytes cause issues, but bytes usually work
                 with fitz.open(stream=st.session_state.pdf_bytes, filetype="pdf") as doc: total_pages = doc.page_count
             except Exception as pdf_load_err: st.error(f"Error loading PDF for page count: {pdf_load_err}"); total_pages = 1; st.session_state.current_page = 1
 
-            # Ensure current page is valid after potential changes (like loading history)
             current_display_page = max(1, min(int(st.session_state.get('current_page', 1)), total_pages))
-            # Update state only if it was actually corrected
             if current_display_page != st.session_state.get('current_page'):
                  st.session_state.current_page = current_display_page
-                 # No rerun here, just update the state for rendering
 
             nav_cols = st.columns([1, 3, 1])
             with nav_cols[0]:
@@ -1113,69 +1169,55 @@ if st.session_state.pdf_bytes is not None:
                 if st.button("Next ➡️", key="next_page", disabled=(current_display_page >= total_pages), use_container_width=True): st.session_state.current_page += 1; st.session_state.last_search_result = None; st.rerun()
 
             page_info_text = f"Page {current_display_page} of {total_pages}"; search_context_ref = None
-            # Simplify logic for displaying search context
             if st.session_state.last_search_result and st.session_state.last_search_result['page'] == current_display_page:
                 search_context_ref = st.session_state.last_search_result.get('ref', 'Search')
-                if st.session_state.last_search_result.get('all_findings'):
-                     page_info_text += f" (🎯 Multi-match: '{search_context_ref}')"
-                else:
-                     page_info_text += f" (🎯 Ref: '{search_context_ref}')"
+                if st.session_state.last_search_result.get('all_findings'): page_info_text += f" (🎯 Multi-match: '{search_context_ref}')"
+                else: page_info_text += f" (🎯 Ref: '{search_context_ref}')"
 
             nav_cols[1].markdown(f"<div style='text-align: center; padding-top: 0.5rem;'>{page_info_text}</div>", unsafe_allow_html=True)
 
-            # Display jump buttons only if there are multiple findings
             if st.session_state.last_search_result and st.session_state.last_search_result.get('all_findings'):
                 multi_findings = st.session_state.last_search_result['all_findings']; found_pages = sorted([f[0] for f in multi_findings])
-                status_msg = st.session_state.last_search_result.get('status', ''); # Get status message
-                if status_msg: viewer_status_placeholder.info(status_msg) # Show multi-match status
+                status_msg = st.session_state.last_search_result.get('status', '');
+                if status_msg: viewer_status_placeholder.info(status_msg)
                 st.write("Jump to other matches for this reference:")
-                num_buttons = len(found_pages); btn_cols = st.columns(min(num_buttons, 5)) # Limit columns
-                current_search_ref = st.session_state.last_search_result.get('ref', 'unknown') # Get ref for key uniqueness
+                num_buttons = len(found_pages); btn_cols = st.columns(min(num_buttons, 5))
+                current_search_ref = st.session_state.last_search_result.get('ref', 'unknown')
 
                 for idx, p_num in enumerate(found_pages):
-                    col_idx = idx % len(btn_cols) # Distribute buttons across columns
-                    is_current = (p_num == current_display_page)
+                    col_idx = idx % len(btn_cols); is_current = (p_num == current_display_page)
                     jump_button_key = f"jump_{p_num}_{current_search_ref}"
                     if btn_cols[col_idx].button(f"Page {p_num}", key=jump_button_key, disabled=is_current, use_container_width=True):
                         st.session_state.current_page = p_num; new_instances = next((inst for pg, inst in multi_findings if pg == p_num), None)
-                        # Update last_search_result correctly for the new page
                         st.session_state.last_search_result['instances'] = new_instances
                         st.session_state.last_search_result['page'] = p_num
-                        # Ensure status message reflects the jump, not the multi-match warning anymore
                         term_desc = st.session_state.last_search_result.get('term', 'text')
-                        st.session_state.last_search_result['status'] = f"✅ Viewing match for '{term_desc}' on page {p_num}." # Update status
-                        st.session_state.last_search_result['all_findings'] = None # Clear multi-findings after jump
-                        st.rerun() # Rerun to display the new page and status
+                        st.session_state.last_search_result['status'] = f"✅ Viewing match for '{term_desc}' on page {p_num}."
+                        st.session_state.last_search_result['all_findings'] = None # Clear after jump
+                        st.rerun()
 
             st.markdown("---")
             highlights_to_apply = None; render_status_override = None
-            # Apply highlights if search result exists and matches current page
             if st.session_state.last_search_result and st.session_state.last_search_result.get('page') == current_display_page:
                 highlights_to_apply = st.session_state.last_search_result.get('instances')
-                # Only override status if NOT in multi-match display mode (i.e., all_findings is None/cleared)
                 if not st.session_state.last_search_result.get('all_findings'):
                     render_status_override = st.session_state.last_search_result.get('status')
 
-            # Render the PDF page image
             image_bytes, render_status = render_pdf_page_to_image(st.session_state.pdf_bytes, current_display_page, highlight_instances=highlights_to_apply, dpi=150)
 
             if image_bytes:
                 st.image(image_bytes, caption=f"Page {current_display_page} - View", use_container_width=True)
-                # Determine final status message to display
                 final_status = render_status_override if render_status_override else render_status
-                # Display status unless we are showing the multi-match jump buttons
                 if not (st.session_state.last_search_result and st.session_state.last_search_result.get('all_findings')):
                     if final_status:
                         if "✅" in final_status or "✨" in final_status or "Found" in final_status : viewer_status_placeholder.success(final_status)
                         elif "⚠️" in final_status or "warning" in final_status.lower() or "multiple pages" in final_status.lower(): viewer_status_placeholder.warning(final_status)
                         elif "❌" in final_status or "error" in final_status.lower(): viewer_status_placeholder.error(final_status)
                         else: viewer_status_placeholder.caption(final_status)
-                    else: viewer_status_placeholder.empty() # Clear status if none applies
+                    else: viewer_status_placeholder.empty()
             else:
-                 # If image rendering failed
                  viewer_status_placeholder.error(f"Failed to render page {current_display_page}. {render_status or ''}")
         else:
-            # If PDF not ready (e.g., during initial load or error)
             st.info("PDF loaded, preparing viewer..."); viewer_status_placeholder.empty()
         st.markdown('</div>', unsafe_allow_html=True) # Sticky wrapper end
 
