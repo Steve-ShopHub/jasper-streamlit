@@ -654,8 +654,17 @@ if st.session_state.pdf_bytes is not None:
     # --- Column 1: Analysis Results ---
     with col1:
         if st.session_state.run_status_summary:
-            final_status = "✅ Success"; has_failures = any(s['status'] == "Failed" or "Error" in s['status'] for s in st.session_state.run_status_summary); has_warnings = any(s['status'] != "Success" and not has_failures for s in st.session_state.run_status_summary)
-            if has_failures: final_status = "❌ Failed"; elif has_warnings: final_status = "⚠️ Issues"
+            final_status = "✅ Success" # Start with success
+            has_failures = any(s['status'] == "Failed" or "Error" in s['status'] for s in st.session_state.run_status_summary)
+            has_warnings = any(s['status'] != "Success" and not has_failures for s in st.session_state.run_status_summary)
+
+            # Corrected logic block
+            if has_failures:
+                final_status = "❌ Failed"
+            elif has_warnings:
+                final_status = "⚠️ Issues"
+            # No 'else' needed, as final_status defaults to "✅ Success"
+
             with st.expander(f"📊 Analysis Run Summary ({final_status})", expanded=(final_status != "✅ Success")):
                 for item in st.session_state.run_status_summary:
                     icon = "✅" if item['status'] == "Success" else "❌" if item['status'] == "Failed" or "Error" in item['status'] else "⚠️"
