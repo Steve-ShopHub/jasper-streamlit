@@ -43,7 +43,7 @@ st.markdown("""
 
 # --- 2. Configuration & Setup ---
 # API_KEY_ENV_VAR = "GEMINI_API_KEY" # No longer reading from ENV at startup
-MODEL_NAME = "gemini-1.5-pro-preview-0514" # Ensure this model is appropriate for your key/access
+MODEL_NAME = "gemini-2.5-pro-preview-03-25" # Ensure this model is appropriate for your key/access
 MAX_VALIDATION_RETRIES = 1
 RETRY_DELAY_SECONDS = 3
 PROMPT_FILE = "prompt.txt"
