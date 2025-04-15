@@ -69,7 +69,7 @@ except Exception as e:
     st.stop()
 
 # --- 2. Configuration & Setup ---
-MODEL_NAME = "gemini-1.5-pro-preview-0409" # Using 1.5 Pro now
+MODEL_NAME = "gemini-2.5-pro-preview-03-25" # Using 1.5 Pro now
 MAX_VALIDATION_RETRIES = 1
 RETRY_DELAY_SECONDS = 3
 PROMPT_FILE = "prompt.txt"
