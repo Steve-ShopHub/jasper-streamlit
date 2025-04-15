@@ -841,7 +841,7 @@ if st.session_state.pdf_bytes is not None:
             if st.session_state.last_search_result and st.session_state.last_search_result.get('page') == current_display_page:
                 highlights_to_apply = st.session_state.last_search_result.get('instances')
                 # Don't override status if we just jumped from multi-match
-                if not st.session_state.last_search_result.get('all_findings') or not all_findings:
+                if not st.session_state.last_search_result.get('all_findings'):
                     render_status_override = st.session_state.last_search_result.get('status')
 
             image_bytes, render_status = render_pdf_page_to_image(st.session_state.pdf_bytes, current_display_page, highlight_instances=highlights_to_apply, dpi=150)
