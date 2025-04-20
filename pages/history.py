@@ -1,5 +1,5 @@
-# 1_📄_History.py
-# --- COMPLETE FILE (v2 - Improved Dataframe Preview) ---
+#history.py
+# --- COMPLETE FILE (v3 - Checklist Name Display) ---
 
 import streamlit as st
 import google.cloud.firestore
@@ -8,8 +8,7 @@ import pandas as pd
 import traceback # For logging errors
 from datetime import datetime # For timestamp formatting
 
-# --- Define Column Order for Preview (Subset/Adaptation of Excel Order) ---
-# Match desired preview columns, using names consistent with app.py's Excel export if possible
+# --- Define Column Order for Preview (Adaptation of Excel Order) ---
 PREVIEW_COLUMN_ORDER = [
     "Question Number",
     "Question Category",
@@ -27,8 +26,6 @@ def format_timestamp(ts):
     if isinstance(ts, datetime):
         return ts.strftime('%Y-%m-%d %H:%M:%S')
     elif isinstance(ts, google.cloud.firestore.SERVER_TIMESTAMP.__class__):
-         # Handle server timestamps if they somehow appear directly
-         # This is less common for retrieved data; usually converted to datetime
          return "Timestamp pending"
     return str(ts) # Fallback for unexpected types
 
@@ -98,10 +95,11 @@ try:
             timestamp = run_data.get("analysis_timestamp") # Might be Firestore Timestamp
             results_raw = run_data.get("results", []) # Raw results list
             gcs_path = run_data.get("gcs_pdf_path")
+            checklist_name = run_data.get("checklist_name", "Unknown") # Get checklist name
 
             ts_str = format_timestamp(timestamp) # Use helper function
 
-            expander_title = f"📄 {filename} ({ts_str})"
+            expander_title = f"📄 {filename} | ✅ Checklist: {checklist_name} | 🕒 {ts_str}"
             if not gcs_path:
                 expander_title += " (⚠️ PDF Missing)"
 
@@ -112,6 +110,14 @@ try:
                     st.caption(f"Document ID: `{doc_id}`")
                     num_results = len(results_raw) if isinstance(results_raw, list) else 0
                     st.caption(f"Number of result items: {num_results}")
+                    # Display run status if available
+                    run_status = run_data.get("run_status", [])
+                    if run_status and isinstance(run_status, list) and run_status[0]:
+                         status_info = run_status[0]
+                         status_val = status_info.get("status", "N/A")
+                         icon = "✅" if status_val == "Success" else "⚠️" if status_val == "Partial Success" else "❌" if status_val == "Failed" else "❓"
+                         st.caption(f"Analysis Status: {icon} {status_val}")
+
                     if not gcs_path:
                         st.warning("Original PDF file link is missing. Cannot reload analysis.", icon="⚠️")
 
@@ -121,8 +127,10 @@ try:
                     load_help = "Load this analysis (results and PDF)." if not load_disabled else "Cannot load (PDF link missing)."
 
                     if st.button("🔄 Load this Analysis", key=load_button_key, disabled=load_disabled, help=load_help, use_container_width=True):
+                        # Set state variables needed by app.py to load history
                         st.session_state['load_history_id'] = doc_id
-                        st.switch_page("app.py")
+                        # No need to set other state vars here, app.py handles it
+                        st.switch_page("app.py") # Switch back to the main page
 
                 st.markdown("---")
                 # Display results preview using the processed data
