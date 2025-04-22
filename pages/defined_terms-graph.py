@@ -19,7 +19,7 @@ from PIL import Image # For Logo import
 from collections import defaultdict
 
 # --- Configuration ---
-MODEL_NAME = "gemini-1.5-pro-latest" # Or your preferred model
+MODEL_NAME = "gemini-2.5-pro-preview-03-25" # Or your preferred model
 PAGE_TITLE = "Defined Terms Relationship Grapher"
 PAGE_ICON = "🔗"
 DEFAULT_NODE_COLOR = "#ACDBC9" # Light greenish-teal
