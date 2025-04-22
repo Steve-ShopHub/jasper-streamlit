@@ -91,7 +91,7 @@ except Exception as e:
     st.stop()
 
 # --- 2. Configuration & Setup ---
-MODEL_NAME = "gemini-1.5-pro-latest" # Explicitly using 1.5 Pro
+MODEL_NAME = "gemini-2.5-pro-preview-03-25" # Explicitly using 1.5 Pro
 MAX_VALIDATION_RETRIES = 1
 RETRY_DELAY_SECONDS = 3
 LOGO_FILE = "jasper-logo-1.png" # Ensure this file exists
@@ -825,19 +825,19 @@ def find_text_in_pdf(_pdf_bytes, search_text):
             term = attempt['term']; desc = attempt['desc']; findings_for_term = []
             if not term: continue # Skip empty terms
 
-            # Check if doc is valid before accessing page_count
             if not doc or doc.is_closed:
-                 # This case should ideally not happen if logic is correct, but good safety check
                  raise ValueError("Document closed unexpectedly during search attempts.")
 
-            for page_index in range(doc.page_count): # Access page_count here
+            for page_index in range(doc.page_count):
                 page = doc.load_page(page_index);
                 try:
-                    instances = page.search_for(term, flags=search_flags, quads=False, hit_max=0)
+                    # *** CORRECTED LINE: Removed hit_max=0 ***
+                    instances = page.search_for(term, flags=search_flags, quads=False)
                     if instances: findings_for_term.append((page_index + 1, instances))
                 except Exception as search_page_err:
+                    # Print warning but continue searching other pages/terms
                     print(f"WARN: Error searching page {page_index+1} for '{term}': {search_page_err}")
-                    continue # Skip this page on error
+                    continue
 
             if findings_for_term:
                 first_page_found = findings_for_term[0][0]
@@ -849,18 +849,14 @@ def find_text_in_pdf(_pdf_bytes, search_text):
                     pages_found = sorted([f[0] for f in findings_for_term])
                     total_matches = sum(len(f[1]) for f in findings_for_term)
                     status = f"⚠️ Found {total_matches} matches using '{desc}' on multiple pages: {pages_found}. Showing first match on page {first_page_found}."
-
-                # *** REMOVED doc.close() call from here ***
                 return first_page_found, instances_on_first_page, term, status, findings_for_term
 
         # If loop finishes without finding anything
         tried_descs = [a['desc'] for a in search_attempts if a['term']];
-        # *** REMOVED doc.close() call from here ***
         return None, None, None, f"❌ Text not found (tried methods: {', '.join(tried_descs)}).", None
 
     except Exception as e:
         print(f"ERROR searching PDF: {e}\n{traceback.format_exc()}")
-        # *** REMOVED doc.close() call from here ***
         return None, None, None, f"❌ Error during PDF search: {e}", None
 
     finally:
@@ -868,9 +864,7 @@ def find_text_in_pdf(_pdf_bytes, search_text):
         if doc and not doc.is_closed:
              try:
                  doc.close()
-                 # print("DEBUG: Closed doc in finally block.") # Optional debug print
              except Exception as close_err:
-                 # Log error if closing fails, but don't crash the app
                  print(f"WARN: Error closing PDF in finally block: {close_err}")
 
 
