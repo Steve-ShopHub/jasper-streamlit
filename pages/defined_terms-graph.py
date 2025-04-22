@@ -17,7 +17,7 @@ from PIL import Image # For Logo import
 from collections import defaultdict
 
 # --- Configuration ---
-MODEL_NAME = "gemini-1.5-pro-latest"
+MODEL_NAME = "gemini-2.5-pro-preview-03-25"
 PAGE_TITLE = "Defined Terms Relationship Grapher"
 PAGE_ICON = "🔗"
 DEFAULT_NODE_COLOR = "#ACDBC9" # Light greenish-teal
@@ -49,17 +49,36 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- Helper Function for Text Extraction (Unchanged) ---
+# --- Helper Function for Text Extraction (Corrected) ---
 @st.cache_data(show_spinner="Extracting text from PDF...")
 def extract_text_from_pdf(pdf_bytes):
-    # ... (identical to previous version) ...
-    if not pdf_bytes: return None, "No PDF file provided."
-    try: doc = fitz.open(stream=pdf_bytes, filetype="pdf"); text = "";
-    for page_num in range(len(doc)): page = doc.load_page(page_num); text += page.get_text("text", sort=True); text += "\n--- Page Break --- \n"
-    doc.close();
-    if not text.strip(): return None, "Could not extract any text from the PDF."
-    return text, None
-    except Exception as e: error_msg = f"Error extracting text: {e}"; print(traceback.format_exc()); return None, error_msg
+    if not pdf_bytes:
+        return None, "No PDF file provided."
+    doc = None # Initialize doc outside try block for finally clause
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        text = ""
+        # Correctly indented loop inside the try block
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            text += page.get_text("text", sort=True) # sort=True helps with reading order
+            text += "\n--- Page Break --- \n" # Add page breaks for context
+
+        if not text.strip():
+            return None, "Could not extract any text from the PDF."
+        return text, None
+    except Exception as e:
+        # Correctly placed except block
+        error_msg = f"Error extracting text: {e}"
+        print(traceback.format_exc())
+        return None, error_msg
+    finally:
+        # Ensure the document is closed even if errors occur
+        if doc:
+            try:
+                doc.close()
+            except Exception:
+                pass # Ignore errors during close if already handling another exception
 
 # --- Helper Function to Parse AI JSON Response ---
 def parse_ai_response(response_text):
