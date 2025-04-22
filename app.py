@@ -792,47 +792,47 @@ def generate_checklist_analysis_per_category(checklist_prompt_template, all_chec
 def find_text_in_pdf(_pdf_bytes, search_text):
     """Searches PDF. Returns (first_page_found, instances_on_first_page, term_used, status_msg, all_findings)"""
     if not _pdf_bytes or not search_text: return None, None, None, "Invalid input (PDF bytes or search text missing).", None
-    doc = None; search_text_cleaned = search_text.strip(); words = search_text_cleaned.split(); num_words = len(words)
+
+    doc = None # Initialize doc to None
+    search_text_cleaned = search_text.strip()
+    words = search_text_cleaned.split()
+    num_words = len(words)
     search_attempts = []
-    # --- Build Search Terms List (Prioritized) ---
-    # Prioritize longer, more specific phrases first
+
+    # --- Build Search Terms List (unchanged) ---
     term_full = search_text_cleaned
     if term_full: search_attempts.append({'term': term_full, 'desc': "full text"})
-
-    # First sentence if distinct and long enough
     sentences = re.split(r'(?<=[.?!])\s+', term_full); term_sentence = sentences[0].strip() if sentences else ""
     if term_sentence and len(term_sentence) >= SEARCH_FALLBACK_MIN_LENGTH and term_sentence != term_full:
         search_attempts.append({'term': term_sentence, 'desc': "first sentence"})
-
-    # Longer prefix (e.g., first 10 words)
     if num_words >= 10:
         term_10 = ' '.join(words[:10])
         if term_10 != term_full and term_10 != term_sentence:
             search_attempts.append({'term': term_10, 'desc': "first 10 words"})
-
-    # Shorter prefix (e.g., first 5 words) - only if distinct from others and meets min words
     if num_words >= SEARCH_PREFIX_MIN_WORDS:
         term_5 = ' '.join(words[:5])
-        if term_5 != term_full and term_5 != term_sentence and term_5 != (search_attempts[-1]['term'] if search_attempts else None): # Check against last added term
+        if term_5 != term_full and term_5 != term_sentence and term_5 != (search_attempts[-1]['term'] if search_attempts else None):
              search_attempts.append({'term': term_5, 'desc': "first 5 words"})
-
-    # Basic fallback if only a few words
     if num_words < SEARCH_PREFIX_MIN_WORDS and len(term_full) >= SEARCH_FALLBACK_MIN_LENGTH and not any(term_full == a['term'] for a in search_attempts):
         search_attempts.append({'term': term_full, 'desc': "short text fallback"})
 
-
     # --- Execute Search Attempts ---
     try:
-        doc = fitz.open(stream=_pdf_bytes, filetype="pdf"); search_flags = fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES
+        doc = fitz.open(stream=_pdf_bytes, filetype="pdf")
+        search_flags = fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES
+
         for attempt in search_attempts:
             term = attempt['term']; desc = attempt['desc']; findings_for_term = []
             if not term: continue # Skip empty terms
 
-            # print(f"DEBUG: Searching for '{term}' ({desc})") # Debugging
-            for page_index in range(doc.page_count):
+            # Check if doc is valid before accessing page_count
+            if not doc or doc.is_closed:
+                 # This case should ideally not happen if logic is correct, but good safety check
+                 raise ValueError("Document closed unexpectedly during search attempts.")
+
+            for page_index in range(doc.page_count): # Access page_count here
                 page = doc.load_page(page_index);
                 try:
-                    # Use search with hit_max=0 to get all instances
                     instances = page.search_for(term, flags=search_flags, quads=False, hit_max=0)
                     if instances: findings_for_term.append((page_index + 1, instances))
                 except Exception as search_page_err:
@@ -840,7 +840,8 @@ def find_text_in_pdf(_pdf_bytes, search_text):
                     continue # Skip this page on error
 
             if findings_for_term:
-                first_page_found = findings_for_term[0][0]; instances_on_first_page = findings_for_term[0][1]
+                first_page_found = findings_for_term[0][0]
+                instances_on_first_page = findings_for_term[0][1]
                 status = ""
                 if len(findings_for_term) == 1:
                     status = f"✅ Found using '{desc}' on page {first_page_found} ({len(instances_on_first_page)} instance(s))."
@@ -848,23 +849,29 @@ def find_text_in_pdf(_pdf_bytes, search_text):
                     pages_found = sorted([f[0] for f in findings_for_term])
                     total_matches = sum(len(f[1]) for f in findings_for_term)
                     status = f"⚠️ Found {total_matches} matches using '{desc}' on multiple pages: {pages_found}. Showing first match on page {first_page_found}."
-                # Close doc immediately after finding results
-                if doc and not doc.is_closed: doc.close()
+
+                # *** REMOVED doc.close() call from here ***
                 return first_page_found, instances_on_first_page, term, status, findings_for_term
 
         # If loop finishes without finding anything
         tried_descs = [a['desc'] for a in search_attempts if a['term']];
-        if doc and not doc.is_closed: doc.close()
+        # *** REMOVED doc.close() call from here ***
         return None, None, None, f"❌ Text not found (tried methods: {', '.join(tried_descs)}).", None
+
     except Exception as e:
         print(f"ERROR searching PDF: {e}\n{traceback.format_exc()}")
-        if doc and not doc.is_closed: doc.close()
+        # *** REMOVED doc.close() call from here ***
         return None, None, None, f"❌ Error during PDF search: {e}", None
+
     finally:
-        # Ensure doc is closed in all paths
+        # Ensure doc is closed *only* here if it was successfully opened and is not already closed
         if doc and not doc.is_closed:
-             try: doc.close()
-             except Exception: pass # Ignore errors during final close
+             try:
+                 doc.close()
+                 # print("DEBUG: Closed doc in finally block.") # Optional debug print
+             except Exception as close_err:
+                 # Log error if closing fails, but don't crash the app
+                 print(f"WARN: Error closing PDF in finally block: {close_err}")
 
 
 @st.cache_data(show_spinner=False, max_entries=20) # Cache rendered pages
