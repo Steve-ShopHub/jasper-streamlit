@@ -1183,65 +1183,65 @@ elif st.session_state.dtg_graph_data:
         elif G is None:
             st.error("Graph object (G) is None, cannot render.")
         else:
-             try:
-                 # agraph component call
-                 agraph_return = agraph(nodes=agraph_nodes, edges=agraph_edges, config=config)
-                 # Optional: Handle click events if needed by inspecting agraph_return
-                 # if agraph_return and agraph_return != st.session_state.dtg_highlight_node:
-                 #     st.session_state.dtg_highlight_node = agraph_return
-                 #     st.rerun() # Rerun if click changes selection
+                try:
+                    # agraph component call - Ensure config doesn't have repeated keywords
+                    agraph_return = agraph(nodes=agraph_nodes, edges=agraph_edges, config=config)
+                    # Optional: Handle click events if needed by inspecting agraph_return
+                    # if agraph_return and agraph_return != st.session_state.dtg_highlight_node:
+                    #     st.session_state.dtg_highlight_node = agraph_return
+                    #     st.rerun() # Rerun if click changes selection
 
-             except Exception as agraph_err:
-                 st.error(f"Error rendering graph component: {agraph_err}")
-                 print(traceback.format_exc())
-
-
-    with info_col:
-        st.subheader("Details & Analysis")
-        st.markdown("**Selected Definition:**")
-        selected_def = terms_map.get(highlight_node, "_Select node in sidebar or graph_")
-        # Use markdown for better formatting control if definition contains markdown
-        # st.markdown(f"<div class='definition-box'>{selected_def}</div>", unsafe_allow_html=True)
-        # Or stick to text_area if plain text is guaranteed/preferred
-        st.text_area("Definition Display", value=selected_def, height=150, disabled=True, label_visibility="collapsed", key="def_display_box")
+                except Exception as agraph_err:
+                    st.error(f"Error rendering graph component: {agraph_err}")
+                    print(traceback.format_exc())
 
 
-        st.markdown("---")
-        st.markdown("**Graph Analysis:**")
-        if G is None:
-             st.warning("Analysis unavailable (Graph not built).")
-        else:
-             if st.session_state.dtg_cycles is not None:
-                  num_cycles = len(st.session_state.dtg_cycles)
-                  if num_cycles > 0:
-                       with st.expander(f"🚨 Found {num_cycles} Circular Definition(s)", expanded=False):
-                            for i, cycle in enumerate(st.session_state.dtg_cycles):
-                                st.markdown(f"- Cycle {i+1}: `{' → '.join(cycle)} → {cycle[0]}`")
-                  else: st.caption("✅ No circular definitions detected.")
-             else: st.caption(" Cycle analysis failed or not run.")
+        with info_col:
+            st.subheader("Details & Analysis")
+            st.markdown("**Selected Definition:**")
+            selected_def = terms_map.get(highlight_node, "_Select node in sidebar or graph_")
+            # Use markdown for better formatting control if definition contains markdown
+            # st.markdown(f"<div class='definition-box'>{selected_def}</div>", unsafe_allow_html=True)
+            # Or stick to text_area if plain text is guaranteed/preferred
+            st.text_area("Definition Display", value=selected_def, height=150, disabled=True, label_visibility="collapsed", key="def_display_box")
 
 
-             if st.session_state.dtg_orphans is not None:
-                  num_orphans = len(st.session_state.dtg_orphans)
-                  # Filter orphans based on current node filter
-                  displayed_orphans = [o for o in st.session_state.dtg_orphans if o in displayed_node_ids]
-                  num_displayed_orphans = len(displayed_orphans)
-
-                  if num_displayed_orphans > 0:
-                       expander_label = f"⚠️ Found {num_displayed_orphans} Orphan Term(s)"
-                       if filter_term: expander_label += " (matching filter)"
-                       with st.expander(expander_label, expanded=False):
-                            st.markdown(f"`{', '.join(sorted(displayed_orphans))}`")
-                            st.caption("_Defined but not linked within definition network (in current view)._")
-                  elif num_orphans > 0 and not filter_term: # Only show if no filter applied
-                       st.caption("✅ All defined terms linked (in current view).")
-                  elif num_orphans == 0:
-                        st.caption("✅ All defined terms linked.")
-
-             else: st.caption(" Orphan analysis failed or not run.")
+            st.markdown("---")
+            st.markdown("**Graph Analysis:**")
+            if G is None:
+                 st.warning("Analysis unavailable (Graph not built).")
+            else:
+                 if st.session_state.dtg_cycles is not None:
+                      num_cycles = len(st.session_state.dtg_cycles)
+                      if num_cycles > 0:
+                           with st.expander(f"🚨 Found {num_cycles} Circular Definition(s)", expanded=False):
+                                for i, cycle in enumerate(st.session_state.dtg_cycles):
+                                    st.markdown(f"- Cycle {i+1}: `{' → '.join(cycle)} → {cycle[0]}`")
+                      else: st.caption("✅ No circular definitions detected.")
+                 else: st.caption(" Cycle analysis failed or not run.")
 
 
-st.divider()
+                 if st.session_state.dtg_orphans is not None:
+                      num_orphans = len(st.session_state.dtg_orphans)
+                      # Filter orphans based on current node filter
+                      displayed_orphans = [o for o in st.session_state.dtg_orphans if o in displayed_node_ids]
+                      num_displayed_orphans = len(displayed_orphans)
+
+                      if num_displayed_orphans > 0:
+                           expander_label = f"⚠️ Found {num_displayed_orphans} Orphan Term(s)"
+                           if filter_term: expander_label += " (matching filter)"
+                           with st.expander(expander_label, expanded=False):
+                                st.markdown(f"`{', '.join(sorted(displayed_orphans))}`")
+                                st.caption("_Defined but not linked within definition network (in current view)._")
+                      elif num_orphans > 0 and not filter_term: # Only show if no filter applied
+                           st.caption("✅ All defined terms linked (in current view).")
+                      elif num_orphans == 0:
+                            st.caption("✅ All defined terms linked.")
+
+                 else: st.caption(" Orphan analysis failed or not run.")
+
+
+        st.divider()
         # Generate DOT Code & Downloads
         st.subheader("Export Graph (Current View)")
         export_cols = st.columns(4)
@@ -1411,21 +1411,26 @@ st.divider()
 
 
 # --- Fallback/Error/Initial State Messages ---
-# These messages show when not processing and no results are ready yet.
+# This elif MUST be aligned with the 'if st.session_state.dtg_processing:' and
+# 'elif st.session_state.dtg_graph_data:' lines above it (zero indentation).
 elif not st.session_state.dtg_processing:
+    # This block shows messages when not processing and no results are ready yet.
     if st.session_state.dtg_error: # Display error if one exists from previous steps
         st.error(f"❌ Error state: {st.session_state.dtg_error}")
     elif not st.session_state.dtg_pdf_bytes:
         st.info("⬆️ Upload a document (PDF) using the sidebar to get started.")
     elif not (st.session_state.dtg_extracted_text or st.session_state.dtg_definitions_text):
-        st.warning("⚠️ Document uploaded, but no text could be extracted. Cannot proceed.")
+        # Check if there's a specific error message already
+        if not st.session_state.dtg_error:
+             st.warning("⚠️ Document uploaded, but no text could be extracted. Cannot proceed.")
+        # If dtg_error is already set (e.g., from extraction fail), it will be shown by the first 'if'
     elif not st.session_state.api_key:
          st.info("🔑 Enter your Google AI Gemini API Key in the sidebar to enable analysis.")
     else:
-        # Ready state
+        # Ready state: PDF is loaded, text extracted (or definitions), API key present
         st.info("⬆️ Ready to generate. Click the 'Generate & Analyze Graph' button in the sidebar.")
 
-# Footer in Sidebar
+# Footer in Sidebar - These should be at the top level (zero indentation)
 st.sidebar.markdown("---")
 st.sidebar.markdown("Developed with Streamlit & Google Gemini")
 st.sidebar.caption(f"Using model: {MODEL_NAME}")
