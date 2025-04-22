@@ -1155,7 +1155,6 @@ elif st.session_state.dtg_graph_data:
         width='100%',
         height=700,
         directed=True,
-        physics=is_physics,
         hierarchical=not is_physics,
         node={'labelProperty':'label', 'size': 15, 'font': {'size': 12}}, # Slightly smaller default font
         edge={'smooth': {'type': 'cubicBezier', 'forceDirection': 'vertical', 'roundness': 0.4} if not is_physics else True}, # Smoother hierarchical edges
