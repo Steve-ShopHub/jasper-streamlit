@@ -965,9 +965,9 @@ def reset_app_state():
     """Resets the session state for a new analysis or clearing history."""
     # Preserve API key and AI params across resets
     current_api_key = st.session_state.get('api_key', None)
-    current_temp = st.session_state.get('ai_temperature', 0.2)
-    current_top_p = st.session_state.get('ai_top_p', 0.95)
-    current_top_k = st.session_state.get('ai_top_k', 40)
+    current_temp = st.session_state.get('ai_temperature', 0.0)
+    current_top_p = st.session_state.get('ai_top_p', 0.05)
+    current_top_k = st.session_state.get('ai_top_k', 1)
     current_available_checklists = st.session_state.get('available_checklists', {})
 
     # Clear most state variables
