@@ -2093,11 +2093,11 @@ if st.session_state.pdf_bytes is not None:
                     )
                 if found_page:
                     # Convert fitz.Rect instances to simple tuples for storing in session state
-                    instance_tuples = tuple(i.irectuple for i in instances if isinstance(i, fitz.Rect)) if instances else None
+                    instance_tuples = tuple(tuple(i) for i in instances if isinstance(i, fitz.Rect)) if instances else None
                     all_findings_tuples = None
-                    if all_findings:
-                        # Ensure inner elements are Rects before converting
-                        all_findings_tuples = tuple((page, tuple(i.irectuple for i in inst_list if isinstance(i, fitz.Rect))) for page, inst_list in all_findings)
+                if all_findings:
+                    # Ensure inner elements are Rects before converting
+                    all_findings_tuples = tuple((page, tuple(tuple(i) for i in inst_list if isinstance(i, fitz.Rect))) for page, inst_list in all_findings)
 
 
                     st.session_state.last_search_result = {
