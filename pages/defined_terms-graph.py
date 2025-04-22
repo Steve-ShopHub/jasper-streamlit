@@ -786,7 +786,12 @@ Your task is to analyze the provided text chunk, focusing ONLY on formal definit
 **Final Output (Valid JSON Object with 'terms' key ONLY):**
 """
         terms_generation_config = types.GenerationConfig(response_mime_type="application/json", temperature=0.1)
-        safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HATE_SPEECH", "SEXUALLY_EXPLICIT", "DANGEROUS_CONTENT"]]
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"} # Ensure uppercase
+        ]
 
         processed_chunk_count = 0
         for i, chunk in enumerate(text_chunks):
@@ -1236,82 +1241,173 @@ elif st.session_state.dtg_graph_data:
              else: st.caption(" Orphan analysis failed or not run.")
 
 
-    st.divider()
-    # Generate DOT Code & Downloads
-    st.subheader("Export Graph (Current View)")
-    export_cols = st.columns(4)
-    safe_filename_base = re.sub(r'[^\w\-]+', '_', st.session_state.dtg_pdf_name or "graph").strip('_')
+st.divider()
+        # Generate DOT Code & Downloads
+        st.subheader("Export Graph (Current View)")
+        export_cols = st.columns(4)
+        safe_filename_base = re.sub(r'[^\w\-]+', '_', st.session_state.dtg_pdf_name or "graph").strip('_')
 
-    # Build DOT code based on the currently displayed nodes/edges
-    dot_lines = ["digraph G {"];
-    # Optional: Add graph attributes like layout engine hint
-    # dot_lines.append('  layout=dot; rankdir=TB;') # Example for hierarchical top-bottom
-    node_style_map = {node.id: f'[label="{node.label}", color="{node.color}", fontcolor="#000000", fontsize=10, width=1.5, height=0.5, shape=box]' for node in agraph_nodes} # Example styling
-
-    for node_id in sorted(list(displayed_node_ids)):
-        style = node_style_map.get(node_id, f'[label="{node_id}"]') # Basic label if no style mapped
-        # Quote node IDs if they contain spaces or special characters
-        quoted_node_id = f'"{node_id}"' if re.search(r'[\s"\'\[\]\{\}\(\)\<\>\\#%;,]', node_id) else node_id
-        dot_lines.append(f'  {quoted_node_id} {style};')
-
-    # Use the agraph_edges_tuples which is already filtered
-    for u, v in sorted(list(agraph_edges_tuples)):
-        quoted_u = f'"{u}"' if re.search(r'[\s"\'\[\]\{\}\(\)\<\>\\#%;,]', u) else u
-        quoted_v = f'"{v}"' if re.search(r'[\s"\'\[\]\{\}\(\)\<\>\\#%;,]', v) else v
-        dot_lines.append(f'  {quoted_u} -> {quoted_v};')
-
-    dot_lines.append("}")
-    generated_dot_code = "\n".join(dot_lines)
-
-    # Download Buttons
-    with export_cols[0]:
-        export_cols[0].download_button(label="📥 DOT Code (.dot)", data=generated_dot_code, file_name=f"{safe_filename_base}_graph.dot", mime="text/vnd.graphviz", use_container_width=True)
-
-    with export_cols[1]:
-         try:
-             # Ensure graphviz executable is in PATH or handle error
-             g_render = graphviz.Source(generated_dot_code)
-             png_bytes = g_render.pipe(format='png')
-             export_cols[1].download_button(label="🖼️ PNG Image (.png)", data=png_bytes, file_name=f"{safe_filename_base}_graph.png", mime="image/png", use_container_width=True)
-         except graphviz.backend.execute.ExecutableNotFound:
-             export_cols[1].warning("Install Graphviz (dot executable) for PNG export.", icon="⚠️")
-         except Exception as render_err:
-             export_cols[1].warning(f"PNG ERR: {render_err}", icon="⚠️")
-             print(f"ERROR: PNG Rendering Error: {traceback.format_exc()}")
-
-    with export_cols[2]:
-         try:
-             # Ensure graphviz executable is in PATH
-             g_render_svg = graphviz.Source(generated_dot_code)
-             svg_bytes = g_render_svg.pipe(format='svg')
-             export_cols[2].download_button(label="📐 SVG Image (.svg)", data=svg_bytes, file_name=f"{safe_filename_base}_graph.svg", mime="image/svg+xml", use_container_width=True)
-         except graphviz.backend.execute.ExecutableNotFound:
-             export_cols[2].warning("Install Graphviz (dot executable) for SVG export.", icon="⚠️")
-         except Exception as render_err:
-             export_cols[2].warning(f"SVG ERR: {render_err}", icon="⚠️")
-             print(f"ERROR: SVG Rendering Error: {traceback.format_exc()}")
-
-    with export_cols[3]:
-        if G:
-            try:
-                 # Export only the dependencies visible in the current filtered view
-                 dep_list = [{"Source Term": u, "Depends On (Target Term)": v} for u, v in sorted(list(agraph_edges_tuples))]
-                 if dep_list:
-                     df_deps = pd.DataFrame(dep_list)
-                 else: # Create empty dataframe with correct columns if no edges displayed
-                     df_deps = pd.DataFrame(columns=["Source Term", "Depends On (Target Term)"])
-
-                 csv_output = df_deps.to_csv(index=False).encode('utf-8')
-                 export_cols[3].download_button(label="📋 Dependencies (.csv)", data=csv_output, file_name=f"{safe_filename_base}_dependencies.csv", mime="text/csv", use_container_width=True)
-            except Exception as csv_err:
-                 export_cols[3].warning(f"CSV ERR: {csv_err}", icon="⚠️")
-                 print(f"ERROR: CSV Export Error: {traceback.format_exc()}")
-        else:
-            export_cols[3].button("📋 Dependencies (.csv)", disabled=True, use_container_width=True, help="Graph not available for CSV export")
+        # --- Build DOT code with proper escaping ---
+        dot_lines = ["digraph G {"];
+        # Optional: Add graph attributes like layout engine hint, charset
+        dot_lines.append('  charset="UTF-8";')
+        # Define default node attributes (can be overridden per node)
+        dot_lines.append('  node [shape=box fontsize=10 width=1.5 height=0.5 fontcolor="#000000"];')
+        # Define default edge attributes (less common to set globally)
+        # dot_lines.append('  edge [color="#CCCCCC"];')
 
 
-    with st.expander("View Generated DOT Code (for current view)"):
-        st.code(generated_dot_code, language='dot')
+        # Prepare styles with escaped labels for all currently displayed nodes
+        node_styles = {}
+        for node in agraph_nodes: # agraph_nodes have string IDs and safe labels
+            # node.id should already be a string here based on previous logic
+            # node.label is the sanitized label used for agraph display
+            # Escape quotes and backslashes within the label for DOT syntax
+            escaped_label = str(node.label).replace('\\', '\\\\').replace('"', '\\"')
+            # Define specific style attributes, label is crucial
+            node_styles[node.id] = f'[label="{escaped_label}", color="{node.color}"]' # Add other attributes if needed
+
+
+        # Add node definitions to DOT
+        for node_id in sorted(list(displayed_node_ids)): # These are strings now
+             # Get the pre-calculated style with escaped label
+             # Default to a basic label if something went wrong with style mapping
+             default_escaped_label = node_id.replace('\\', '\\\\').replace('"', '\\"')
+             style = node_styles.get(node_id, f'[label="{default_escaped_label}"]')
+
+             # Escape quotes and backslashes in the ID itself *before* checking if it needs surrounding quotes
+             escaped_node_id_for_quoting = node_id.replace('\\', '\\\\').replace('"', '\\"')
+
+             # Determine if the original node ID needs surrounding quotes in DOT syntax
+             # Simple IDs (alphanumeric + underscore, not starting with number) don't need quotes.
+             # Keywords (node, edge, graph, digraph, subgraph, strict) also need quoting.
+             needs_quoting = False
+             if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', node_id) or \
+                node_id.lower() in ['node', 'edge', 'graph', 'digraph', 'subgraph', 'strict']:
+                 needs_quoting = True
+             # Also quote if it contains any characters problematic for DOT IDs
+             elif re.search(r'[\s"\'\[\]\{\}\(\)\<\>\\#%;,./:\-]', node_id):
+                  needs_quoting = True
+
+
+             # Use the escaped version inside quotes if needed, otherwise use the original ID
+             final_node_id_str = f'"{escaped_node_id_for_quoting}"' if needs_quoting else node_id
+
+             dot_lines.append(f'  {final_node_id_str} {style};')
+
+
+        # Add edge definitions to DOT (using string IDs from agraph_edges_tuples)
+        for u, v in sorted(list(agraph_edges_tuples)):
+
+            # --- Escape and quote source node ID (u) ---
+            escaped_u = u.replace('\\', '\\\\').replace('"', '\\"')
+            needs_quoting_u = False
+            if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', u) or \
+               u.lower() in ['node', 'edge', 'graph', 'digraph', 'subgraph', 'strict'] or \
+               re.search(r'[\s"\'\[\]\{\}\(\)\<\>\\#%;,./:\-]', u):
+                 needs_quoting_u = True
+            quoted_u = f'"{escaped_u}"' if needs_quoting_u else u
+
+            # --- Escape and quote target node ID (v) ---
+            escaped_v = v.replace('\\', '\\\\').replace('"', '\\"')
+            needs_quoting_v = False
+            if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', v) or \
+               v.lower() in ['node', 'edge', 'graph', 'digraph', 'subgraph', 'strict'] or \
+               re.search(r'[\s"\'\[\]\{\}\(\)\<\>\\#%;,./:\-]', v):
+                 needs_quoting_v = True
+            quoted_v = f'"{escaped_v}"' if needs_quoting_v else v
+
+            # Add the edge definition with potentially quoted IDs
+            dot_lines.append(f'  {quoted_u} -> {quoted_v};') # Add edge attributes here if needed [color="...", style="..."]
+
+        dot_lines.append("}")
+        generated_dot_code = "\n".join(dot_lines)
+
+        # --- Download Buttons (using the corrected generated_dot_code) ---
+        with export_cols[0]:
+            export_cols[0].download_button(
+                label="📥 DOT Code (.dot)",
+                data=generated_dot_code,
+                file_name=f"{safe_filename_base}_graph.dot",
+                mime="text/vnd.graphviz",
+                use_container_width=True
+            )
+
+        with export_cols[1]: # PNG Export
+             try:
+                 # Ensure graphviz executable is in PATH or handle error
+                 g_render = graphviz.Source(generated_dot_code, encoding='utf-8') # Specify encoding
+                 png_bytes = g_render.pipe(format='png')
+                 export_cols[1].download_button(
+                     label="🖼️ PNG Image (.png)",
+                     data=png_bytes,
+                     file_name=f"{safe_filename_base}_graph.png",
+                     mime="image/png",
+                     use_container_width=True
+                 )
+             except graphviz.backend.execute.ExecutableNotFound:
+                 export_cols[1].warning("Install Graphviz (dot executable) for PNG export.", icon="⚠️")
+             except graphviz.backend.execute.CalledProcessError as cpe:
+                 # Display the actual error from the 'dot' command
+                 error_message = cpe.stderr.decode('utf-8', errors='ignore') if cpe.stderr else str(cpe)
+                 export_cols[1].error(f"Graphviz PNG Error: {error_message}", icon="❌")
+                 print(f"ERROR: Graphviz PNG Failed. DOT code snippet:\n{generated_dot_code[:1000]}...") # Log partial DOT
+                 print(traceback.format_exc())
+             except Exception as render_err:
+                 export_cols[1].warning(f"PNG ERR: {type(render_err).__name__} - {render_err}", icon="⚠️")
+                 print(f"ERROR: Unexpected PNG Rendering Error: {traceback.format_exc()}")
+
+        with export_cols[2]: # SVG Export
+             try:
+                 # Ensure graphviz executable is in PATH
+                 g_render_svg = graphviz.Source(generated_dot_code, encoding='utf-8') # Specify encoding
+                 svg_bytes = g_render_svg.pipe(format='svg')
+                 export_cols[2].download_button(
+                     label="📐 SVG Image (.svg)",
+                     data=svg_bytes,
+                     file_name=f"{safe_filename_base}_graph.svg",
+                     mime="image/svg+xml",
+                     use_container_width=True
+                 )
+             except graphviz.backend.execute.ExecutableNotFound:
+                 export_cols[2].warning("Install Graphviz (dot executable) for SVG export.", icon="⚠️")
+             except graphviz.backend.execute.CalledProcessError as cpe:
+                 # Display the actual error from the 'dot' command
+                 error_message = cpe.stderr.decode('utf-8', errors='ignore') if cpe.stderr else str(cpe)
+                 export_cols[2].error(f"Graphviz SVG Error: {error_message}", icon="❌")
+                 print(f"ERROR: Graphviz SVG Failed. DOT code snippet:\n{generated_dot_code[:1000]}...") # Log partial DOT
+                 print(traceback.format_exc())
+             except Exception as render_err:
+                 export_cols[2].warning(f"SVG ERR: {type(render_err).__name__} - {render_err}", icon="⚠️")
+                 print(f"ERROR: Unexpected SVG Rendering Error: {traceback.format_exc()}")
+
+        with export_cols[3]: # CSV Export
+            if G:
+                try:
+                     # Export only the dependencies visible in the current filtered view
+                     dep_list = [{"Source Term": u, "Depends On (Target Term)": v} for u, v in sorted(list(agraph_edges_tuples))]
+                     if dep_list:
+                         df_deps = pd.DataFrame(dep_list)
+                     else: # Create empty dataframe with correct columns if no edges displayed
+                         df_deps = pd.DataFrame(columns=["Source Term", "Depends On (Target Term)"])
+
+                     csv_output = df_deps.to_csv(index=False).encode('utf-8')
+                     export_cols[3].download_button(
+                         label="📋 Dependencies (.csv)",
+                         data=csv_output,
+                         file_name=f"{safe_filename_base}_dependencies.csv",
+                         mime="text/csv",
+                         use_container_width=True
+                     )
+                except Exception as csv_err:
+                     export_cols[3].warning(f"CSV ERR: {csv_err}", icon="⚠️")
+                     print(f"ERROR: CSV Export Error: {traceback.format_exc()}")
+            else:
+                export_cols[3].button("📋 Dependencies (.csv)", disabled=True, use_container_width=True, help="Graph not available for CSV export")
+
+
+        with st.expander("View Generated DOT Code (for current view)"):
+            st.code(generated_dot_code, language='dot')
 
 
 # --- Fallback/Error/Initial State Messages ---
