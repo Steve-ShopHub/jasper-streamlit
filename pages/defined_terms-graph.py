@@ -9,7 +9,7 @@ import traceback
 import time
 
 # --- Configuration ---
-MODEL_NAME = "gemini-1.5-pro-latest"
+MODEL_NAME = "gemini-2.5-pro-preview-03-25"
 PAGE_TITLE = "Defined Terms Relationship Grapher"
 PAGE_ICON = "🔗"
 
