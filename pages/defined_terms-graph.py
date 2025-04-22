@@ -420,35 +420,60 @@ elif st.session_state.dtg_graph_data:
     # Determine highlight set
     highlight_neighbors_predecessors = set(); highlight_neighbors_successors = set()
     if highlight_node and G: highlight_neighbors_predecessors, highlight_neighbors_successors = get_neighbors(G, highlight_node)
-    # Prepare Agraph Nodes & Edges
-    agraph_nodes = []; agraph_edges = []; agraph_edges_tuples = [] # Store tuples for DOT gen
+# --- Prepare Agraph Nodes & Edges ---
+    agraph_nodes = []; agraph_edges = []; agraph_edges_tuples = [] # Store tuples for DOT
     displayed_node_ids = set()
     if G:
+        # Create Node objects (add nodes to displayed_node_ids)
         for node_id in G.nodes():
             if node_id not in nodes_to_display_names: continue
             displayed_node_ids.add(node_id); node_color = DEFAULT_NODE_COLOR; node_size = 15
             if node_id == highlight_node: node_color = HIGHLIGHT_COLOR; node_size = 25
             elif node_id in highlight_neighbors_predecessors or node_id in highlight_neighbors_successors: node_color = NEIGHBOR_COLOR; node_size = 20
             agraph_nodes.append(Node(id=node_id, label=node_id, color=node_color, size=node_size, font={'color': "#000000"}))
+
+        # Create Edge objects and tuples
         for u, v in G.edges():
             if u in displayed_node_ids and v in displayed_node_ids:
                  agraph_edges_tuples.append((u, v)) # Store tuple
                  agraph_edges.append(Edge(source=u, target=v, color="#CCCCCC")) # Create Agraph Edge
 
-    # Configure Agraph
+    # --- Configure Agraph (MODIFIED) ---
     is_physics = st.session_state.dtg_layout == 'Physics'
-    config = Config(width='100%', height=700, directed=True, physics=is_physics, hierarchical=not is_physics,
-                    highlightColor=HIGHLIGHT_COLOR, collapsible=False, node={'labelProperty':'label', 'size': 15},
-                    physics_config={'barnesHut': {'gravitationalConstant': -10000, 'centralGravity': 0.1, 'springLength': 180, 'springConstant': 0.05, 'damping': 0.09, 'avoidOverlap': 0.1}, 'minVelocity': 0.75} if is_physics else None,
-                    layout={'hierarchical': {'enabled': (not is_physics), 'sortMethod': 'directed', 'levelSeparation': 150, 'nodeSpacing': 120}} if not is_physics else None,
-                    interaction={'navigationButtons': True, 'keyboard': True, 'tooltipDelay': 300, 'hover': True} )
+    config = Config(
+        width='100%',
+        height=700,
+        directed=True,
+        physics=is_physics, # Enable/disable physics based on selection
+        hierarchical=not is_physics, # Enable/disable hierarchical based on selection
+        highlightColor=HIGHLIGHT_COLOR,
+        collapsible=False,
+        node={'labelProperty':'label', 'size': 15},
+        # --- MODIFIED LINES: Use {} instead of None ---
+        physics_config={'barnesHut': {'gravitationalConstant': -10000, 'centralGravity': 0.1, 'springLength': 180, 'springConstant': 0.05, 'damping': 0.09, 'avoidOverlap': 0.1}, 'minVelocity': 0.75} if is_physics else {}, # Use {} when disabled
+        layout={'hierarchical': {'enabled': (not is_physics), 'sortMethod': 'directed', 'levelSeparation': 150, 'nodeSpacing': 120}} if not is_physics else {}, # Use {} when disabled
+        # --- END MODIFICATION ---
+        interaction={'navigationButtons': True, 'keyboard': True, 'tooltipDelay': 300, 'hover': True}
+    )
 
-    # Display Area
+    # --- Display Area ---
     graph_col, info_col = st.columns([3, 1])
     with graph_col:
         st.caption("Graph View: Click/drag to pan, scroll/pinch to zoom. Select node in sidebar to highlight.")
         if not agraph_nodes: st.warning(f"No nodes match filter: '{filter_term}'")
-        else: agraph_return = agraph(nodes=agraph_nodes, edges=agraph_edges, config=config)
+        # --- Add check to ensure nodes/edges are not empty before calling agraph ---
+        elif agraph_nodes and agraph_edges is not None: # Check nodes AND edges list
+             try:
+                  agraph_return = agraph(nodes=agraph_nodes, edges=agraph_edges, config=config)
+             except Exception as agraph_err:
+                  st.error(f"Error rendering graph component: {agraph_err}")
+                  print(traceback.format_exc()) # Log detailed error
+        elif agraph_nodes: # Handle case where filter results in nodes but no edges
+             try:
+                  agraph_return = agraph(nodes=agraph_nodes, edges=[], config=config) # Pass empty edge list
+             except Exception as agraph_err:
+                  st.error(f"Error rendering graph component (nodes only): {agraph_err}")
+                  print(traceback.format_exc()) # Log detailed error
     with info_col:
         st.subheader("Details & Analysis"); st.markdown("**Selected Definition:**")
         selected_def = terms_map.get(highlight_node, "_Select node in sidebar_")
