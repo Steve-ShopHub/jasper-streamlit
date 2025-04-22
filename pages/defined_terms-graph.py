@@ -306,6 +306,15 @@ can_generate = (st.session_state.api_key and
                 st.session_state.dtg_pdf_bytes and
                 st.session_state.dtg_extracted_text and
                 not st.session_state.dtg_processing)
+
+# --- DEBUG START ---
+st.sidebar.write(f"API Key Present: {bool(st.session_state.api_key)}")
+st.sidebar.write(f"PDF Bytes Present: {bool(st.session_state.dtg_pdf_bytes)}")
+st.sidebar.write(f"Extracted Text Present: {bool(st.session_state.dtg_extracted_text)}")
+st.sidebar.write(f"Processing Flag False: {not st.session_state.dtg_processing}")
+st.sidebar.write(f"--> can_generate: {can_generate}")
+# --- DEBUG END ---
+
 generate_button_tooltip = ""
 if st.session_state.dtg_processing: generate_button_tooltip = "Processing..."
 elif not st.session_state.api_key: generate_button_tooltip = "Enter API Key"
@@ -313,6 +322,10 @@ elif not st.session_state.dtg_pdf_bytes: generate_button_tooltip = "Upload a doc
 elif not st.session_state.dtg_extracted_text: generate_button_tooltip = "Could not extract text from document"
 else: generate_button_tooltip = "Generate graph and analyze term relationships using Gemini"
 if st.sidebar.button("✨ Generate & Analyze Graph", key="dtg_generate", disabled=not can_generate, help=generate_button_tooltip, use_container_width=True, type="primary"):
+    # --- DEBUG START ---
+    st.toast("Generate button clicked! Setting processing state.")
+    print(f"DEBUG: Button clicked. dtg_processing will be set to True.")
+    # --- DEBUG END ---
     st.session_state.dtg_processing = True
     st.session_state.dtg_graph_data = None; st.session_state.dtg_nx_graph = None
     st.session_state.dtg_cycles = None; st.session_state.dtg_orphans = None
@@ -348,6 +361,11 @@ if st.session_state.dtg_graph_data:
 
 # --- Main Area ---
 if st.session_state.dtg_processing:
+    # --- DEBUG START ---
+    st.toast("Entering processing block...")
+    print("DEBUG: dtg_processing is True, entering main processing block.")
+    # --- DEBUG END ---
+
     status_placeholder = st.empty()
     with st.spinner(f"⚙️ Analyzing '{st.session_state.dtg_pdf_name}'..."):
         status_placeholder.info("🧠 Asking Gemini to extract terms, definitions, and relationships...")
@@ -382,7 +400,7 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
 **Final Output (Valid JSON Object Only):**
 """
             model = genai.GenerativeModel(MODEL_NAME)
-            generation_config = types.GenerationConfig(response_mime_type="application/json", temperature=0.1, topP=0.05)
+            generation_config = types.GenerationConfig(response_mime_type="application/json", temperature=0.1, top_p=0.05)
             safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
             status_placeholder.info("📞 Calling Gemini API (expecting JSON)...")
             response = model.generate_content(contents=prompt_instructions, generation_config=generation_config, safety_settings=safety_settings, request_options={'timeout': 600})
