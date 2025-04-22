@@ -1,5 +1,5 @@
 # app.py
-# --- COMPLETE FILE (v11 - Per Category Prompting & Gemini 2.5 Pro) ---
+# --- COMPLETE FILE (v11.1 - Fixed Timestamp Error) ---
 
 import streamlit as st
 import pandas as pd
@@ -13,7 +13,8 @@ import sys
 import json
 import re
 import time
-from datetime import datetime
+# Updated datetime import
+from datetime import datetime, timezone
 import traceback
 from collections import defaultdict # To group questions by category
 import plotly.express as px
@@ -90,7 +91,7 @@ except Exception as e:
     st.stop()
 
 # --- 2. Configuration & Setup ---
-MODEL_NAME = "gemini-2.5-pro-preview-03-25"
+MODEL_NAME = "gemini-1.5-pro-latest" # Explicitly using 1.5 Pro
 MAX_VALIDATION_RETRIES = 1
 RETRY_DELAY_SECONDS = 3
 LOGO_FILE = "jasper-logo-1.png" # Ensure this file exists
@@ -343,8 +344,10 @@ def assign_question_numbers(questions_list):
     """Assigns sequential 'assigned_number' to each question dict."""
     numbered_questions = []
     for i, q_dict in enumerate(questions_list):
-        q_dict['assigned_number'] = i + 1 # 1-based indexing
-        numbered_questions.append(q_dict)
+        # Ensure we don't modify the original dict if it's from state
+        q_copy = q_dict.copy()
+        q_copy['assigned_number'] = i + 1 # 1-based indexing
+        numbered_questions.append(q_copy)
     return numbered_questions
 
 def format_category_questions_for_prompt(questions_in_category):
@@ -540,21 +543,33 @@ def generate_checklist_analysis_per_category(checklist_prompt_template, all_chec
 
     total_categories = len(grouped_questions)
     processed_categories = 0
+    if total_categories == 0:
+         status_placeholder.warning("⚠️ No question categories found. Analysis cannot proceed.")
+         return [], "Skipped", ["No question categories found."]
+
     status_placeholder.info(f"✅ Found {len(numbered_questions)} questions across {total_categories} categories.")
 
     # --- Setup GenAI Model and Config (once) ---
-    model = genai.GenerativeModel(model_name=MODEL_NAME, system_instruction=system_instruction_text)
-    generation_config = types.GenerationConfig(
-        response_mime_type="application/json",
-        response_schema=ai_response_schema_dict,
-        temperature=gen_config_params['temperature'],
-        top_p=gen_config_params['top_p'],
-        top_k=gen_config_params['top_k']
-    )
-    safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
+    try:
+        model = genai.GenerativeModel(model_name=MODEL_NAME, system_instruction=system_instruction_text)
+        generation_config = types.GenerationConfig(
+            response_mime_type="application/json",
+            response_schema=ai_response_schema_dict,
+            temperature=gen_config_params['temperature'],
+            top_p=gen_config_params['top_p'],
+            top_k=gen_config_params['top_k']
+        )
+        safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
+    except Exception as model_setup_err:
+        status_placeholder.error(f"❌ Failed to set up Generative Model: {model_setup_err}")
+        return None, "Failed", [f"Model setup error: {model_setup_err}"]
+
 
     # --- Process Each Category ---
-    for category_name, questions_in_category in grouped_questions.items():
+    sorted_category_names = sorted(grouped_questions.keys()) # Process alphabetically
+
+    for category_name in sorted_category_names:
+        questions_in_category = grouped_questions[category_name]
         processed_categories += 1
         category_progress = 15 + int(65 * (processed_categories / total_categories)) # Progress from 15% to 80%
         progress_bar.progress(category_progress, text=f"Processing Category {processed_categories}/{total_categories}: '{category_name}'...")
@@ -636,8 +651,9 @@ def generate_checklist_analysis_per_category(checklist_prompt_template, all_chec
                                 status_placeholder.warning(f"⚠️ {error_msg} (Attempt {attempt}).")
                                 # Continue retry loop if possible
 
-                            if validated_ai_data_subset is None: # Critical validation error (e.g., not a list)
-                                category_warnings.append(f"CRITICAL validation error for '{category_name}': Response was not a list.")
+                            # This case handles where validate_ai_data returns None (critical schema error)
+                            if validated_ai_data_subset is None:
+                                category_warnings.append(f"CRITICAL validation error for '{category_name}': Response did not match schema base structure (e.g., not a list).")
                                 category_status = "Failed (Validation)"
                                 break # Do not retry critical validation error
 
@@ -645,15 +661,27 @@ def generate_checklist_analysis_per_category(checklist_prompt_template, all_chec
                             error_msg = f"JSON Decode Error for '{category_name}' (Attempt {attempt}): {json_err}. Raw text: '{full_response_text[:500]}...'"
                             st.error(f"{error_msg}"); st.code(full_response_text, language='text')
                             category_warnings.append(error_msg); category_status = "Failed (JSON Error)"
+                            # Don't retry JSON errors unless they seem transient
                         except Exception as parse_validate_err:
                             error_msg = f"Parsing/Validation Error for '{category_name}' (Attempt {attempt}): {type(parse_validate_err).__name__}: {parse_validate_err}"
                             st.error(error_msg); category_warnings.append(error_msg); print(traceback.format_exc()); category_status = "Failed (Validation)"
                     else: # No response parts (blocked, etc.)
                         block_reason = "Unknown"; finish_reason = "Unknown"; safety_ratings = None
-                        try:
-                            if response.prompt_feedback: block_reason = getattr(response.prompt_feedback, 'block_reason', 'Unknown').name; safety_ratings = response.prompt_feedback.safety_ratings
-                            if response.candidates: finish_reason = getattr(response.candidates[0], 'finish_reason', 'Unknown').name
-                        except AttributeError: pass
+                        try: # Use getattr for safer access
+                            if response.prompt_feedback:
+                                block_reason_obj = getattr(response.prompt_feedback, 'block_reason', 'Unknown')
+                                block_reason = block_reason_obj.name if hasattr(block_reason_obj, 'name') else str(block_reason_obj)
+                                safety_ratings = getattr(response.prompt_feedback, 'safety_ratings', None)
+                            # Access finish_reason from the first candidate if it exists
+                            if response.candidates:
+                                finish_reason_obj = getattr(response.candidates[0], 'finish_reason', 'Unknown')
+                                finish_reason = finish_reason_obj.name if hasattr(finish_reason_obj, 'name') else str(finish_reason_obj)
+                                # Also check candidate safety ratings if prompt feedback didn't have them
+                                if not safety_ratings:
+                                     safety_ratings = getattr(response.candidates[0], 'safety_ratings', None)
+                        except Exception as resp_parse_err:
+                            print(f"Warning: Could not parse response feedback/candidate details: {resp_parse_err}")
+
                         safety_info = f" Ratings: {safety_ratings}" if safety_ratings else ""
                         warn_msg = f"API Issue for '{category_name}' (Attempt {attempt}): Finish: {finish_reason}, Block: {block_reason}.{safety_info}";
                         if finish_reason == "SAFETY": st.error(warn_msg); category_status = "Failed (Safety Block)"
@@ -687,26 +715,27 @@ def generate_checklist_analysis_per_category(checklist_prompt_template, all_chec
                  category_status = "Failed" # Ensure status reflects failure
 
             category_statuses[category_name] = {"status": category_status, "warnings": category_warnings}
-            all_analysis_warnings.extend([f"Category '{category_name}': {w}" for w in category_warnings]) # Prefix warnings with category
+            # Prefix warnings with category name for clarity in the overall summary
+            all_analysis_warnings.extend([f"Category '{category_name}': {w}" for w in category_warnings])
 
         except ValueError as ve: # Catch prompt generation errors etc.
-            status_placeholder.error(f"❌ Error processing category '{category_name}': {ve}")
+            status_placeholder.error(f"❌ Error preparing prompt for category '{category_name}': {ve}")
             category_statuses[category_name] = {"status": "Failed (Setup Error)", "warnings": [str(ve)]}
             all_analysis_warnings.append(f"Category '{category_name}' Setup Error: {ve}")
-            # Decide whether to continue with other categories or stop. Let's continue for now.
+            # Continue with other categories
         except Exception as cat_err:
             status_placeholder.error(f"❌ Unexpected Error processing category '{category_name}': {cat_err}")
             category_statuses[category_name] = {"status": "Failed (Critical Error)", "warnings": [str(cat_err)]}
             all_analysis_warnings.append(f"Category '{category_name}' Critical Error: {cat_err}")
             print(f"Critical error in category loop for {category_name}: {traceback.format_exc()}")
-            # Continue to next category unless it was a critical API error handled above
+            # Continue to next category unless it was a critical API error handled above which would have raised
 
     # --- Final Aggregation and Status Determination ---
     progress_bar.progress(85, text="Aggregating results...")
     status_placeholder.info("📊 Aggregating results from all categories...")
 
     # Check if all *original* questions were answered across all categories
-    final_found_q_nums = {item.get('Question Number') for item in all_validated_data}
+    final_found_q_nums = {item.get('Question Number') for item in all_validated_data if isinstance(item, dict)}
     original_q_nums = {q.get('assigned_number') for q in numbered_questions}
     missing_overall_q_nums = original_q_nums - final_found_q_nums
     if missing_overall_q_nums:
@@ -714,33 +743,47 @@ def generate_checklist_analysis_per_category(checklist_prompt_template, all_chec
         all_analysis_warnings.append(warn_msg)
         status_placeholder.warning(warn_msg)
 
-    # Determine overall status
+    # Determine overall status based on category statuses
     overall_status = "Success" # Assume success initially
     any_partial = False
     any_failed = False
-    any_empty = False
+    all_empty_or_skipped = True # Assume all are empty/skipped until proven otherwise
 
-    for cat_name, cat_info in category_statuses.items():
-        status = cat_info['status']
-        if status.startswith("Failed"): any_failed = True
-        if status == "Partial Success": any_partial = True
-        if status == "Success (Empty)": any_empty = True
+    if not category_statuses: # Handle case where no categories were processed (e.g., initial error)
+        overall_status = "Failed"
+        if not all_analysis_warnings: all_analysis_warnings.append("No categories processed.")
+    else:
+        for cat_name, cat_info in category_statuses.items():
+            status = cat_info.get('status', 'Unknown')
+            if status.startswith("Failed"): any_failed = True
+            if status == "Partial Success": any_partial = True
+            # If any category succeeded or was partial, not all are empty/skipped
+            if status in ["Success", "Partial Success"]: all_empty_or_skipped = False
 
-    if any_failed: overall_status = "Failed"
-    elif any_partial: overall_status = "Partial Success"
-    elif not all_validated_data and any_empty: overall_status = "Success (Empty)" # If ONLY empty results, status is empty
-    elif not all_validated_data and not any_empty: overall_status = "Failed" # If no data and no 'empty' status, assume failure
+        if any_failed: overall_status = "Failed"
+        elif any_partial: overall_status = "Partial Success"
+        # If all categories were either Success(Empty) or Skipped (e.g., no questions), and no data was actually produced
+        elif all_empty_or_skipped and not all_validated_data: overall_status = "Success (Empty)"
+        # If we have *some* data, but no failures or partials, it's a success.
+        elif all_validated_data and not any_failed and not any_partial: overall_status = "Success"
+        # If no data, and not all empty/skipped (meaning some should have run but didn't), it's a failure.
+        elif not all_validated_data and not all_empty_or_skipped: overall_status = "Failed"
 
+
+    # Display final status message
     if overall_status == "Success":
         status_placeholder.success("✅ Analysis completed successfully across all categories.")
     elif overall_status == "Partial Success":
         status_placeholder.warning("⚠️ Analysis completed, but some categories had partial success or missing answers.")
     elif overall_status == "Success (Empty)":
          status_placeholder.info("ℹ️ Analysis completed, but the AI returned no results across all categories.")
+    elif overall_status == "Skipped":
+         status_placeholder.info("ℹ️ Analysis skipped (e.g., no categories or questions).")
     else: # Failed
         status_placeholder.error("❌ Analysis failed for one or more categories.")
 
     progress_bar.progress(90, text="Analysis aggregated.")
+    # Return all collected data, the determined overall status, and aggregated warnings
     return all_validated_data, overall_status, all_analysis_warnings
 
 
@@ -966,7 +1009,7 @@ def initialize_session_state():
         'processing_in_progress': False,
         'analysis_complete': False,
         'run_key': 0,
-        'run_status_summary': [], # Will store dict per category/overall now
+        'run_status_summary': {}, # Default to empty dict for new summary format
         'excel_data': None,
         'search_trigger': None,
         'last_search_result': None,
@@ -1015,9 +1058,9 @@ if st.session_state.load_history_id:
             gcs_pdf_path = run_data.get("gcs_pdf_path")
             results = run_data.get("results")
             filename = run_data.get("filename", "N/A")
-            timestamp = run_data.get("analysis_timestamp") # Firestore timestamp object
-            # Adapt reading summary: it might be a list of dicts (old format) or a single dict (new potential format)
-            run_summary_data = run_data.get("run_status", []) # Load summary if saved
+            timestamp_obj = run_data.get("analysis_timestamp") # Firestore timestamp object or None
+            # Adapt reading summary: it might be a list of dicts (old format) or a single dict (new format)
+            run_summary_data = run_data.get("run_status", {}) # Default to empty dict
             checklist_name_hist = run_data.get("checklist_name", "Unknown") # Load checklist name
 
             if not gcs_pdf_path:
@@ -1060,7 +1103,24 @@ if st.session_state.load_history_id:
                         st.session_state.pdf_display_ready = True
                         st.session_state.viewing_history = True # Set history mode flag
                         st.session_state.history_filename = filename
-                        st.session_state.history_timestamp = timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if hasattr(timestamp, 'strftime') else str(timestamp)
+                        # Format timestamp safely
+                        try:
+                            # Firestore Timestamps might need conversion to datetime
+                            if isinstance(timestamp_obj, google.cloud.firestore.SERVER_TIMESTAMP.__class__):
+                                # Server timestamps aren't readable directly client-side after fetch,
+                                # rely on read_time which might be close enough or use a saved string.
+                                hist_ts_str = "Timestamp Unavailable"
+                            elif hasattr(timestamp_obj, 'strftime'): # Check if it behaves like datetime
+                                 hist_ts_str = timestamp_obj.strftime('%Y-%m-%d %H:%M:%S UTC')
+                            elif timestamp_obj:
+                                hist_ts_str = str(timestamp_obj) # Fallback to string representation
+                            else:
+                                hist_ts_str = "N/A"
+                        except Exception as ts_format_err:
+                             print(f"Warning: Could not format history timestamp: {ts_format_err}")
+                             hist_ts_str = "Invalid Timestamp"
+                        st.session_state.history_timestamp = hist_ts_str
+
                         st.session_state.current_page = 1 # Reset to first page
                         st.session_state.current_filename = filename # Store filename for potential export
                         st.session_state.history_checklist_name = checklist_name_hist # Store the checklist name
@@ -1130,6 +1190,9 @@ if st.session_state.viewing_history:
                 # Ensure results are sorted by question number for export
                 results_list = sorted(st.session_state.analysis_results, key=lambda x: x.get('Question Number', float('inf'))) if isinstance(st.session_state.analysis_results, list) else []
                 for item in results_list:
+                    # Ensure item is a dict before processing
+                    if not isinstance(item, dict): continue
+
                     references = []; first_search_text = "N/A"; evidence = item.get("Evidence")
                     file_name_for_excel = st.session_state.history_filename # Always use history filename
                     gen_time_for_excel = st.session_state.history_timestamp # Always use history timestamp
@@ -1475,12 +1538,15 @@ else: # Not viewing history
             'top_k': st.session_state.ai_top_k
         }
         checklist_prompt = st.session_state.current_checklist_prompt
-        checklist_questions = st.session_state.current_checklist_questions
+        # Pass a copy to avoid potential modification by assign_question_numbers inside analysis function
+        checklist_questions = copy.deepcopy(st.session_state.current_checklist_questions)
         checklist_id = st.session_state.selected_checklist_id
         checklist_name = st.session_state.selected_checklist_name
 
         run_start_time = datetime.now()
-        run_timestamp_str = run_start_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+        # Use timezone aware timestamp for run time string as well
+        run_timestamp_str = run_start_time.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
 
         if not st.session_state.current_filename:
              st.session_state.current_filename = f"analysis_{run_start_time.strftime('%Y%m%d%H%M%S')}.pdf"
@@ -1559,9 +1625,11 @@ else: # Not viewing history
                 all_validated_data = analysis_data
                 # Add common fields AFTER all results are aggregated
                 for item in all_validated_data:
-                     item["File Name"] = base_file_name
-                     item["Generation Time"] = run_timestamp_str
-                     item["Checklist Name"] = checklist_name
+                     # Ensure item is a dict before adding fields
+                     if isinstance(item, dict):
+                        item["File Name"] = base_file_name
+                        item["Generation Time"] = run_timestamp_str
+                        item["Checklist Name"] = checklist_name
 
                 st.session_state.analysis_results = all_validated_data
                 progress_bar.progress(90, text="Analysis processed. Saving records...")
@@ -1571,9 +1639,11 @@ else: # Not viewing history
                 # --- Save to GCS and Firestore ---
                 if st.session_state.pdf_bytes:
                     try:
-                        timestamp = datetime.now(datetime.timezone.utc)
+                        # Use timezone-aware UTC timestamp for saving
+                        timestamp = datetime.now(timezone.utc) # CORRECTED LINE
                         firestore_doc_id = f"{uuid.uuid4()}"
-                        gcs_blob_name = f"{GCS_PDF_FOLDER}/{timestamp.strftime('%Y%m%d')}/{firestore_doc_id}_{safe_base_name}.pdf"
+                        # Include date in GCS path for better organization
+                        gcs_blob_name = f"{GCS_PDF_FOLDER}/{timestamp.strftime('%Y%m%d')}/{firestore_doc_id}_{safe_base_name}"
 
                         gcs_file_path = upload_to_gcs(GCS_BUCKET_NAME, st.session_state.pdf_bytes, gcs_blob_name, status_text)
 
@@ -1581,7 +1651,7 @@ else: # Not viewing history
                         doc_ref = db.collection("analysis_runs").document(firestore_doc_id)
                         doc_ref.set({
                             "filename": base_file_name,
-                            "analysis_timestamp": timestamp,
+                            "analysis_timestamp": timestamp, # Store UTC timestamp object
                             "results": st.session_state.analysis_results,
                             "run_status": st.session_state.run_status_summary, # Save the overall summary dict
                             "gcs_pdf_path": gcs_file_path,
@@ -1607,12 +1677,12 @@ else: # Not viewing history
         except ValueError as ve: # Catch non-retryable errors like permission issues during setup
              st.error(f"❌ ANALYSIS HALTED: {ve}")
              overall_status = "Failed (Setup Error)"; st.session_state.analysis_complete = False
-             st.session_state.run_status_summary = {"overall_status": overall_status, "checklist": checklist_name, "warnings": [str(ve)]}
+             st.session_state.run_status_summary = {"overall_status": overall_status, "checklist": checklist_name, "timestamp": run_timestamp_str, "warnings": [str(ve)]}
              status_text.error(f"Analysis stopped due to setup error: {ve}")
         except Exception as main_err:
             st.error(f"❌ CRITICAL ERROR during analysis workflow: {main_err}"); print(traceback.format_exc())
             overall_status = "Failed (Critical Error)"; st.session_state.analysis_complete = False
-            st.session_state.run_status_summary = {"overall_status": overall_status, "checklist": checklist_name, "warnings": [str(main_err), "Analysis halted. See logs."]}
+            st.session_state.run_status_summary = {"overall_status": overall_status, "checklist": checklist_name, "timestamp": run_timestamp_str, "warnings": [str(main_err), "Analysis halted. See logs."]}
             status_text.error(f"Analysis stopped due to critical error: {main_err}")
         finally:
             # --- Cleanup ---
@@ -1654,7 +1724,9 @@ if not st.session_state.viewing_history and st.session_state.current_checklist_q
         # Assign temporary numbers for preview purposes if not already done
         temp_numbered_questions = assign_question_numbers(copy.deepcopy(questions_to_display)) # Use deepcopy to avoid modifying state
         for q_dict in temp_numbered_questions:
-            grouped_preview[q_dict.get("Question Category", "Uncategorized")].append(q_dict)
+             # Ensure dict before access
+            if isinstance(q_dict, dict):
+                grouped_preview[q_dict.get("Question Category", "Uncategorized")].append(q_dict)
 
         if not grouped_preview:
             st.caption("No questions loaded.")
@@ -1665,12 +1737,16 @@ if not st.session_state.viewing_history and st.session_state.current_checklist_q
                 # Sort questions within category by their assigned number for consistent preview
                 questions_in_category = sorted(grouped_preview[category], key=lambda q: q.get('assigned_number', float('inf')))
                 for q_data in questions_in_category:
-                    q_num = q_data.get('assigned_number', '?')
-                    q_text = q_data.get('Question', 'N/A')
-                    q_opts = q_data.get('Answer Options', '')
-                    st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{q_num}. {q_text}")
-                    if q_opts:
-                        st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*Options/Guidance: {q_opts}*")
+                    # Ensure q_data is a dict
+                    if isinstance(q_data, dict):
+                        q_num = q_data.get('assigned_number', '?')
+                        q_text = q_data.get('Question', 'N/A')
+                        q_opts = q_data.get('Answer Options', '')
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;{q_num}. {q_text}")
+                        if q_opts:
+                            st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*Options/Guidance: {q_opts}*")
+                    else:
+                         st.warning(f"Skipping invalid question data in preview: {type(q_data)}")
                 st.markdown("---") # Separator between categories
 
 # --- Main Content Area (Results & PDF Viewer) ---
@@ -1690,20 +1766,31 @@ if st.session_state.pdf_bytes is not None:
                 overall_status = summary_data.get("overall_status", "Unknown")
                 checklist_name_sum = summary_data.get("checklist", "N/A")
                 warnings_sum = summary_data.get("warnings", [])
+                # Optional: Add timestamp display from summary if available
+                run_ts_from_summary = summary_data.get("timestamp", None)
+
             elif isinstance(summary_data, list) and summary_data: # Old format (list of dicts)
                 # Try to infer overall status from the list
-                checklist_name_sum = summary_data[0].get("checklist", "N/A") # Get name from first entry
-                all_statuses = [item.get("status", "Unknown") for item in summary_data]
-                if "Failed" in all_statuses: overall_status = "Failed"
+                # Ensure first item is dict before access
+                first_item = summary_data[0] if isinstance(summary_data[0], dict) else {}
+                checklist_name_sum = first_item.get("checklist", "N/A") # Get name from first entry
+
+                all_statuses = [item.get("status", "Unknown") for item in summary_data if isinstance(item, dict)]
+                if not all_statuses: # If list contains non-dicts
+                     overall_status = "Invalid Summary Format"
+                elif "Failed" in all_statuses: overall_status = "Failed"
                 elif "Partial Success" in all_statuses: overall_status = "Partial Success"
                 elif all(s == "Success (Empty)" for s in all_statuses): overall_status = "Success (Empty)"
                 elif all(s == "Success" for s in all_statuses): overall_status = "Success"
                 else: overall_status = "Mixed/Unknown"
                 # Aggregate warnings from all entries in the old list format
                 for item in summary_data:
-                    warnings_sum.extend(item.get("warnings", []))
+                    if isinstance(item, dict):
+                         warnings_sum.extend(item.get("warnings", []))
+                run_ts_from_summary = None # Timestamp not usually in old list format
             else: # No summary data or unrecognized format
                  overall_status = "Not Available"
+                 run_ts_from_summary = None
 
             status_icon_map = {
                 "Success": "✅", "Partial Success": "⚠️", "Failed": "❌",
@@ -1713,6 +1800,10 @@ if st.session_state.pdf_bytes is not None:
             }
             final_status_icon = status_icon_map.get(overall_status, "❓")
             summary_title = f"{final_status_icon} Overall Status for '{checklist_name_sum}': **{overall_status}**"
+
+            # Add timestamp to title if available and not viewing history (history already has it)
+            if run_ts_from_summary and not st.session_state.viewing_history:
+                 summary_title += f" (Run: {run_ts_from_summary})"
 
             # Expand summary if history, not success, or partial/empty/failed
             expand_summary = st.session_state.viewing_history or overall_status not in ["Success"]
@@ -1735,8 +1826,8 @@ if st.session_state.pdf_bytes is not None:
                          if not msg_str: continue # Skip empty messages
 
                          # Check for keywords to determine message type
-                         is_error = any(term in msg_str.lower() for term in ["critical", "error", "block", "fail", "invalid key", "permission"]) and "warning" not in msg_str.lower()
-                         is_warning = any(term in msg_str.lower() for term in ["warn", "missing", "unexpected", "empty list", "mismatch", "recitation", "max_tokens", "timeout", "partial"])
+                         is_error = any(term in msg_str.lower() for term in ["critical", "error", "block", "fail", "invalid key", "permission", "stopping", "halted"]) and "warning" not in msg_str.lower()
+                         is_warning = any(term in msg_str.lower() for term in ["warn", "missing", "unexpected", "empty list", "mismatch", "recitation", "max_tokens", "timeout", "partial", "cleanup issue"])
 
                          prefix = f" {displayed_warnings_count+1}. "
                          if is_error: st.error(f"{prefix}{msg_str}")
@@ -1745,10 +1836,10 @@ if st.session_state.pdf_bytes is not None:
                          else: st.caption(f"{prefix}{msg_str}") # Default to caption for info/other messages
                          displayed_warnings_count += 1
 
-                    if displayed_warnings_count == 0 and not filtered_warnings:
+                    if displayed_warnings_count == 0 and not filtered_warnings and warnings_sum:
                          # If only validation headers existed and were filtered out, mention it here
                          st.caption("No specific operational issues reported, but potential response validation issues detected (see above).")
-                    elif displayed_warnings_count == 0:
+                    elif displayed_warnings_count == 0 and warnings_sum:
                          # Should not happen if warnings_sum was non-empty, but as a fallback
                          st.caption("Issues reported but could not be displayed.")
 
@@ -1760,16 +1851,19 @@ if st.session_state.pdf_bytes is not None:
         # --- Display Results ---
         st.markdown("#### Detailed Analysis Results")
 
-        if (st.session_state.analysis_complete or st.session_state.viewing_history) and st.session_state.analysis_results is not None: # Allow empty list
-            if not st.session_state.analysis_results:
+        # Check if analysis_results is a list before proceeding
+        analysis_results_list = st.session_state.analysis_results if isinstance(st.session_state.analysis_results, list) else None
+
+        if (st.session_state.analysis_complete or st.session_state.viewing_history) and analysis_results_list is not None:
+            if not analysis_results_list:
                  st.info("Analysis complete, but the AI returned no results for this checklist and document.")
             else:
                 try:
                     # Sort results primarily by Question Number for consistent display
-                    results_list = sorted(st.session_state.analysis_results, key=lambda x: x.get('Question Number', float('inf')))
+                    results_list = sorted(analysis_results_list, key=lambda x: x.get('Question Number', float('inf')) if isinstance(x, dict) else float('inf'))
                 except Exception as sort_err:
                      st.warning(f"Could not sort results by question number: {sort_err}. Displaying in original order.")
-                     results_list = st.session_state.analysis_results
+                     results_list = analysis_results_list # Use original if sort fails
 
                 # --- Scatter Plot Expander ---
                 try:
@@ -1777,9 +1871,10 @@ if st.session_state.pdf_bytes is not None:
                     for item in results_list:
                         # Ensure item is a dict before accessing keys
                         if isinstance(item, dict):
+                             evidence_list_plot = item.get('Evidence')
                              plot_data.append({
                                  'Question Number': item.get('Question Number', 0),
-                                 'Number of Evidence Items': len(item.get('Evidence', []) if isinstance(item.get('Evidence'), list) else []),
+                                 'Number of Evidence Items': len(evidence_list_plot) if isinstance(evidence_list_plot, list) else 0,
                                  'Question Category': item.get('Question Category', 'Uncategorized'),
                                  'Question': item.get('Question', 'N/A')
                              })
@@ -1793,8 +1888,7 @@ if st.session_state.pdf_bytes is not None:
                             fig.update_layout(xaxis_title="Question Number", yaxis_title="Number of Evidence Clauses", legend_title_text='Category')
                             st.plotly_chart(fig, use_container_width=True)
                             st.caption("This plot shows how many separate evidence clauses the AI referenced for each question. Hover over points for question details.")
-                    # Don't show plot expander if no data
-                    # else: st.caption("No data available for evidence plot.")
+                    # else: st.caption("No data available for evidence plot.") # Don't show if no data
                 except Exception as plot_err:
                      st.warning(f"Could not generate scatter plot: {plot_err}")
                      print(f"Plotting Error: {plot_err}\n{traceback.format_exc()}")
@@ -1833,7 +1927,7 @@ if st.session_state.pdf_bytes is not None:
                         for i, category in enumerate(categories_ordered):
                             with category_tabs[i]:
                                 # Sort items within the tab by question number
-                                category_items = sorted(grouped_results[category], key=lambda x: x.get('Question Number', float('inf')))
+                                category_items = sorted(grouped_results[category], key=lambda x: x.get('Question Number', float('inf')) if isinstance(x, dict) else float('inf'))
                                 for index, result_item in enumerate(category_items):
                                     # Ensure result_item is a dict
                                     if not isinstance(result_item, dict):
@@ -1908,7 +2002,6 @@ if st.session_state.pdf_bytes is not None:
                                                       # Use markdown with code block for better readability/copying
                                                      st.markdown(f"**AI Extracted Wording for '{clause_ref}':**")
                                                      st.markdown(f"```\n{clause_wording}\n```")
-                                                     # st.text_area(f"AI Extracted Wording for '{clause_ref}':", value=clause_wording, height=100, disabled=True, key=f"wording_area_{base_key}", label_visibility="visible")
 
                                                  # Add a subtle separator between evidence items
                                                  if ev_index < len(evidence_list) - 1:
@@ -1926,7 +2019,6 @@ if st.session_state.pdf_bytes is not None:
                 else: st.info("No results found or categories could not be determined.")
 
                 # --- Excel Download (Button moved to sidebar) ---
-                # Placeholder to inform user where the button is
                 if not st.session_state.viewing_history:
                     st.sidebar.markdown("---")
                     st.sidebar.markdown("## Export Results")
@@ -1935,7 +2027,7 @@ if st.session_state.pdf_bytes is not None:
                         try:
                             excel_rows = [];
                             # Use the sorted list again for export consistency
-                            sorted_results_for_export = sorted(st.session_state.analysis_results, key=lambda x: x.get('Question Number', float('inf'))) if isinstance(st.session_state.analysis_results, list) else []
+                            sorted_results_for_export = sorted(results_list, key=lambda x: x.get('Question Number', float('inf')) if isinstance(x, dict) else float('inf'))
                             for item in sorted_results_for_export:
                                 if not isinstance(item, dict): continue # Skip non-dict items
 
@@ -1999,8 +2091,7 @@ if st.session_state.pdf_bytes is not None:
                         search_text_to_find
                     )
                 if found_page:
-                    # Convert fitz.Rect instances to simple tuples for storing in session state (more reliable)
-                    # Use irectuple for integer coordinates which might be slightly more stable for highlighting
+                    # Convert fitz.Rect instances to simple tuples for storing in session state
                     instance_tuples = tuple(i.irectuple for i in instances if isinstance(i, fitz.Rect)) if instances else None
                     all_findings_tuples = None
                     if all_findings:
@@ -2150,4 +2241,8 @@ st.divider()
 history_cols = st.columns(3)
 with history_cols[1]: # Centered column
     if st.button("📜 View Analysis History", key="view_history_button", use_container_width=True):
-        st.switch_page("pages/history.py")
+        try:
+            st.switch_page("pages/history.py")
+        except Exception as e:
+             # Fallback or error message if switching fails (e.g., page doesn't exist)
+             st.error(f"Could not navigate to History page. Ensure `pages/history.py` exists. Error: {e}")
