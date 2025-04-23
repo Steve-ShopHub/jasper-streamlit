@@ -708,7 +708,7 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
 **Final Output (Valid JSON Object Only, inside ```json ... ``` if needed):**
 """
             model = genai.GenerativeModel(MODEL_NAME)
-            generation_config = types.GenerationConfig(temperature=0.1)
+            generation_config = types.GenerationConfig(temperature=0.0, top_p=0.0)
             safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
 
             status_placeholder.info("📞 Calling Gemini API (waiting for full response)...")
