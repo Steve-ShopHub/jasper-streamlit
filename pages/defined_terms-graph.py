@@ -405,7 +405,7 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
 """
             model = genai.GenerativeModel(MODEL_NAME)
             # --- MODIFICATION: Remove mime_type, use stream=True ---
-            generation_config = types.GenerationConfig(temperature=0.1, top_k=0.05)
+            generation_config = types.GenerationConfig(temperature=0.1, top_p=0.05)
             safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
 
             status_placeholder.info("📞 Calling Gemini API (streaming response)...")
