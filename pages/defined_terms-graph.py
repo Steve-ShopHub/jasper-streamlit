@@ -394,7 +394,7 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
 
             model = genai.GenerativeModel(MODEL_NAME)
             # Explicitly request JSON output MIME type
-            generation_config = types.GenerationConfig(response_mime_type="application/json", temperature=0.1)
+            generation_config = types.GenerationConfig(response_mime_type="application/json", temperature=0.1, top_p=0.05)
             # Standard safety settings
             safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
             status_placeholder.info("📞 Calling Gemini API (expecting JSON with names only)...")
