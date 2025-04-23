@@ -1,5 +1,5 @@
 # pages/defined_terms_graph.py
-# --- COMPLETE FILE vX.Y+5 (History Save/Load + GCS) ---
+# --- COMPLETE FILE vX.Y+6 (Removed Streaming) ---
 
 import streamlit as st
 import google.generativeai as genai
@@ -40,6 +40,7 @@ MAX_UPLOAD_RETRIES = 2
 UPLOAD_RETRY_DELAY = 3 # seconds
 DTG_HISTORY_COLLECTION = "dtg_runs" # Firestore collection for DTG history
 GCS_PDF_FOLDER_DTG = "dtg_pdfs" # Folder within GCS bucket for persistent PDFs
+API_TIMEOUT = 900 # Seconds for Gemini API call
 
 # --- Set Page Config ---
 st.set_page_config(layout="wide", page_title=PAGE_TITLE, page_icon=PAGE_ICON)
@@ -140,43 +141,47 @@ def parse_ai_response(response_text):
     if not response_text or not response_text.strip():
          error_msg = "AI response content is empty."; print(f"[{time.strftime('%H:%M:%S')}] Parsing failed: {error_msg}"); return None, error_msg
     try:
-        json_start_match = re.search(r"(\{.*\}|\[.*\])", response_text, re.DOTALL)
-        json_text = ""
-        if json_start_match:
-            json_text = json_start_match.group(0).strip(); print(f"[{time.strftime('%H:%M:%S')}] Found potential JSON block via regex.")
+        # Try to find JSON within ```json ... ``` fences first
+        match = re.search(r"```json\s*([\s\S]*?)\s*```", response_text, re.IGNORECASE | re.DOTALL)
+        if match:
+            json_text = match.group(1).strip(); print(f"[{time.strftime('%H:%M:%S')}] Found JSON block via markdown fence.")
         else:
-            match = re.search(r"```json\s*([\s\S]*?)\s*```", response_text, re.IGNORECASE | re.DOTALL)
-            if match:
-                json_text = match.group(1).strip(); print(f"[{time.strftime('%H:%M:%S')}] Found potential JSON block via markdown fence.")
-            elif response_text.strip().startswith(("{", "[")):
-                json_text = response_text.strip(); print(f"[{time.strftime('%H:%M:%S')}] Assuming raw response is JSON.")
+            # If no fence, try regex for a starting '{' or '[' followed by anything, ending in '}' or ']'
+            json_start_match = re.search(r"^\s*(\{.*\}|\[.*\])\s*$", response_text, re.DOTALL)
+            if json_start_match:
+                json_text = json_start_match.group(0).strip(); print(f"[{time.strftime('%H:%M:%S')}] Found potential JSON block via full-string regex.")
+            # Fallback: Check if the raw text starts/ends like JSON after stripping whitespace
+            elif response_text.strip().startswith(("{", "[")) and response_text.strip().endswith(("}", "]")):
+                json_text = response_text.strip(); print(f"[{time.strftime('%H:%M:%S')}] Assuming raw stripped response is JSON.")
             else:
-                 potential_json = response_text.strip()
-                 if potential_json.startswith("```") and potential_json.endswith("```"): potential_json = potential_json[3:-3].strip()
-                 if potential_json.startswith("json"): potential_json = potential_json[4:].strip()
-                 if potential_json.startswith("{") or potential_json.startswith("["):
-                      print(f"[{time.strftime('%H:%M:%S')}] Attempting parse after basic cleaning."); json_text = potential_json
-                 else:
-                     error_msg = f"Response does not appear to contain a JSON object/array. Raw text snippet: {response_text[:500]}..."; print(f"[{time.strftime('%H:%M:%S')}] Parsing failed: {error_msg}"); return None, error_msg
+                 error_msg = f"Response does not appear to contain a JSON object/array within ```json...``` or as the primary content. Raw text snippet: {response_text[:500]}..."; print(f"[{time.strftime('%H:%M:%S')}] Parsing failed: {error_msg}"); return None, error_msg
+
         if not json_text:
             error_msg = "Could not extract JSON content from the response."; print(f"[{time.strftime('%H:%M:%S')}] Parsing failed: {error_msg}"); return None, error_msg
-        print(f"[{time.strftime('%H:%M:%S')}] Attempting json.loads() on extracted text (length: {len(json_text)})..."); data = json.loads(json_text); print(f"[{time.strftime('%H:%M:%S')}] json.loads() successful. Validating structure...")
+
+        print(f"[{time.strftime('%H:%M:%S')}] Attempting json.loads() on extracted text (length: {len(json_text)})...");
+        data = json.loads(json_text); print(f"[{time.strftime('%H:%M:%S')}] json.loads() successful. Validating structure...")
+
         if not isinstance(data, dict): return None, "Extracted content is not a JSON object."
         if "terms" not in data or "edges" not in data: return None, "Extracted JSON missing required 'terms' or 'edges' keys."
         if not isinstance(data["terms"], list) or not isinstance(data["edges"], list): return None, "'terms' or 'edges' are not lists."
+
         validated_terms = []; term_names = set()
         for item in data["terms"]:
             if isinstance(item, dict) and "name" in item and isinstance(item["name"], str):
                 term_name = item["name"].strip()
                 if term_name and term_name not in term_names: validated_terms.append({"name": term_name}); term_names.add(term_name)
+
         validated_edges = []
         for edge in data["edges"]:
             if isinstance(edge, dict) and "source" in edge and "target" in edge and isinstance(edge["source"], str) and isinstance(edge["target"], str):
                  source = edge["source"].strip(); target = edge["target"].strip()
                  if source and target and source in term_names and target in term_names: validated_edges.append({"source": source, "target": target})
                  else: print(f"[{time.strftime('%H:%M:%S')}] Warning: Skipping edge with invalid/missing term: {source} -> {target}")
+
         if not validated_terms: return None, "Extracted JSON contained no valid terms after validation."
         validated_data = {"terms": validated_terms, "edges": validated_edges}; parsing_end_time = time.time(); print(f"[{time.strftime('%H:%M:%S')}] Parsing successful. Found {len(validated_terms)} terms, {len(validated_edges)} edges. Duration: {parsing_end_time - parsing_start_time:.2f}s"); return validated_data, None
+
     except json.JSONDecodeError as json_err:
         parsing_end_time = time.time(); error_pos = json_err.pos; context_window = 50; start = max(0, error_pos - context_window); end = min(len(json_text), error_pos + context_window); error_snippet = json_text[start:end] if json_text else response_text[start:end]; error_snippet_display = repr(error_snippet); error_msg = (f"Failed to decode AI JSON response: {json_err}. Error near char {error_pos}. Snippet: ...{error_snippet_display}..."); print(f"[{time.strftime('%H:%M:%S')}] Parsing failed (JSONDecodeError). Duration: {parsing_end_time - parsing_start_time:.2f}s. Error: {error_msg}"); return None, error_msg
     except Exception as e:
@@ -545,7 +550,7 @@ if st.sidebar.button("📜 View Analysis History", key="view_dtg_history", use_c
 # --- Main Area ---
 if st.session_state.dtg_processing:
     status_placeholder = st.empty()
-    live_response_placeholder = st.empty() # Placeholder for live response preview
+    # No live_response_placeholder needed anymore
     full_response_text = ""
     process_start_time = time.time()
     print(f"[{time.strftime('%H:%M:%S')}] ===== Starting Generation Process =====")
@@ -647,48 +652,61 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
             generation_config = types.GenerationConfig(temperature=0.1)
             safety_settings = [{"category": c, "threshold": "BLOCK_NONE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
 
-            status_placeholder.info("📞 Calling Gemini API (streaming response)...")
+            status_placeholder.info("📞 Calling Gemini API (waiting for full response)...")
             print(f"[{time.strftime('%H:%M:%S')}] Sending request to Gemini API with file URI: {uploaded_file_ref.uri}")
             api_call_start_time = time.time()
 
+            # --- NON-STREAMING API CALL ---
             response = model.generate_content(
                 contents=[uploaded_file_ref, prompt_instructions], # Pass file ref and prompt
                 generation_config=generation_config, safety_settings=safety_settings,
-                request_options={'timeout': 900}, stream=True
+                request_options={'timeout': API_TIMEOUT},
+                stream=False # <<< Ensure streaming is OFF
             )
 
-            # --- Stream Processing with Live Preview ---
-            status_placeholder.info("⏳ Receiving streamed response from Gemini...")
-            live_response_placeholder.info("Waiting for first chunk...")
-            print(f"[{time.strftime('%H:%M:%S')}] Waiting for stream...")
-            chunk_count = 0; stream_start_time = None
-            for chunk in response:
-                # (Stream processing loop remains the same as previous version)
-                if stream_start_time is None: stream_start_time = time.time(); print(f"[{time.strftime('%H:%M:%S')}] First chunk received! Latency: {stream_start_time - api_call_start_time:.2f}s"); live_response_placeholder.empty()
-                try:
-                    if hasattr(chunk, 'text') and chunk.text:
-                        full_response_text += chunk.text; chunk_count += 1
-                        if chunk_count % 10 == 0 or chunk_count == 1:
-                             current_time = time.time(); elapsed_stream = current_time - (stream_start_time if stream_start_time else api_call_start_time); print(f"[{time.strftime('%H:%M:%S')}] Received chunk {chunk_count}. Total length: {len(full_response_text)}. Stream duration: {elapsed_stream:.2f}s")
-                             status_placeholder.info(f"⏳ Receiving streamed response... (chunk {chunk_count})")
-                             live_response_placeholder.code(f"# Receiving Chunk {chunk_count}...\n{full_response_text}", language="json")
-                except ValueError as ve: print(f"[{time.strftime('%H:%M:%S')}] Warning: Skipping chunk due to ValueError: {ve}")
-                except Exception as chunk_err: print(f"[{time.strftime('%H:%M:%S')}] Error processing chunk {chunk_count+1}: {chunk_err}")
-
             api_call_end_time = time.time()
-            st.session_state.dtg_raw_ai_response = full_response_text
-            live_response_placeholder.code(f"# Stream Complete. Raw Response:\n{full_response_text}", language="json")
-            print(f"[{time.strftime('%H:%M:%S')}] Stream finished. Chunks: {chunk_count}. Length: {len(full_response_text)} chars.")
-            if stream_start_time: print(f"[{time.strftime('%H:%M:%S')}] Stream duration: {api_call_end_time - stream_start_time:.2f}s.")
-            print(f"[{time.strftime('%H:%M:%S')}] Total API call duration: {api_call_end_time - api_call_start_time:.2f}s.")
+            print(f"[{time.strftime('%H:%M:%S')}] Gemini API call completed. Duration: {api_call_end_time - api_call_start_time:.2f}s.")
 
-            # --- Response Parsing & Graph Building ---
-            live_response_placeholder.empty() # Clear live preview
+            # --- Process Full Response ---
             status_placeholder.info("📄 Processing Gemini's full response...")
+
+            try:
+                # Access the full text directly from the response object
+                full_response_text = response.text
+                st.session_state.dtg_raw_ai_response = full_response_text # Save raw response
+                print(f"[{time.strftime('%H:%M:%S')}] Received full response. Length: {len(full_response_text)} chars.")
+            except ValueError as e:
+                 # Handle potential issues like blocked content (response might lack 'text')
+                 print(f"[{time.strftime('%H:%M:%S')}] Error accessing response text (maybe blocked?): {e}")
+                 # Check response.prompt_feedback for block reasons
+                 block_reason = "Unknown"
+                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
+                     # Attempt to get more specific reason if available
+                     feedback_str = str(response.prompt_feedback)
+                     print(f"[{time.strftime('%H:%M:%S')}] Prompt Feedback: {feedback_str}")
+                     # Simple extraction, might need adjustment based on actual feedback structure
+                     match = re.search(r"reason:\s*([A-Z_]+)", feedback_str, re.IGNORECASE)
+                     if match: block_reason = match.group(1)
+                     else: block_reason = feedback_str[:100] # Fallback to start of feedback
+                 run_error_message = f"Failed to get text from Gemini response. Possible safety block or API issue. Reason: {block_reason}"
+                 raise ValueError(run_error_message) from e
+            except AttributeError:
+                 # Handle cases where 'text' attribute might be missing unexpectedly
+                 print(f"[{time.strftime('%H:%M:%S')}] Response object missing 'text' attribute.")
+                 run_error_message = "Gemini response object structure was unexpected (missing 'text')."
+                 raise ValueError(run_error_message)
+            except Exception as resp_err:
+                 # Catch other potential errors during response access
+                 print(f"[{time.strftime('%H:%M:%S')}] Unexpected error accessing response: {resp_err}")
+                 run_error_message = f"An unexpected error occurred while accessing the Gemini response: {resp_err}"
+                 raise ValueError(run_error_message) from resp_err
+
+
             if not full_response_text.strip():
                  run_error_message = "AI returned an empty response."
                  raise ValueError(run_error_message)
 
+            # --- Response Parsing & Graph Building ---
             graph_data, error_msg = parse_ai_response(full_response_text)
             if error_msg:
                 run_error_message = f"Failed to parse AI response: {error_msg}"
@@ -760,7 +778,7 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
         if not isinstance(e, ValueError): traceback.print_exc() # Print traceback for non-ValueErrors
         # Attempt to save failure record to Firestore
         try:
-            status_placeholder.info("💾 Saving error details to history...")
+            status_placeholder.warning("💾 Saving error details to history...") # Use warning for errors
             error_data = {
                 "filename": st.session_state.get('dtg_pdf_name', 'Unknown'),
                 "analysis_timestamp": current_analysis_timestamp,
@@ -784,7 +802,7 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
         traceback.print_exc()
         # Attempt to save failure record (similar to above)
         try:
-            status_placeholder.info("💾 Saving error details to history...")
+            status_placeholder.warning("💾 Saving error details to history...") # Use warning for errors
             error_data = {"filename": st.session_state.get('dtg_pdf_name', 'Unknown'), "analysis_timestamp": current_analysis_timestamp, "gcs_pdf_path": None, "graph_data": None, "cycles": None, "orphans": None, "model_name": MODEL_NAME, "error_message": run_error_message[:1000]}
             db.collection(DTG_HISTORY_COLLECTION).document(firestore_run_id).set(error_data)
             print(f"[{time.strftime('%H:%M:%S')}] Saved error record {firestore_run_id} to Firestore.")
@@ -798,7 +816,7 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
         print(f"[{time.strftime('%H:%M:%S')}] Entering cleanup phase...")
         # Clear placeholders only after potential saving messages
         status_placeholder.info("🧹 Cleaning up temporary resources...")
-        live_response_placeholder.empty()
+        # No live_response_placeholder to clear
 
         # 1. Delete Temporary Google Cloud File (used for generation)
         if uploaded_file_ref and hasattr(uploaded_file_ref, 'name'):
@@ -836,7 +854,8 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
         print(f"[{time.strftime('%H:%M:%S')}] ===== Generation Process Ended =====")
         print(f"[{time.strftime('%H:%M:%S')}] Total processing duration (incl. save/cleanup): {process_end_time - process_start_time:.2f} seconds.")
         print(f"[{time.strftime('%H:%M:%S')}] Triggering rerun.")
-        time.sleep(1) # Allow user to see final toasts/warnings/status
+        # Short delay allows final messages/toasts to be seen before rerun clears them
+        time.sleep(1.5 if st.session_state.dtg_error else 0.5)
         st.rerun()
 
 elif st.session_state.dtg_graph_data:
@@ -864,7 +883,9 @@ elif st.session_state.dtg_graph_data:
             displayed_node_ids.add(node_id); node_color = DEFAULT_NODE_COLOR; node_size = 15
             if node_id == highlight_node: node_color = HIGHLIGHT_COLOR; node_size = 25
             elif node_id in highlight_neighbors_predecessors or node_id in highlight_neighbors_successors: node_color = NEIGHBOR_COLOR; node_size = 20
-            agraph_nodes.append(Node(id=node_id, label=node_id, color=node_color, size=node_size, font={'color': "#000000"}))
+            # Ensure label is correctly quoted if it contains special characters for agraph ID
+            safe_node_id_label = node_id # Use original name for label
+            agraph_nodes.append(Node(id=node_id, label=safe_node_id_label, color=node_color, size=node_size, font={'color': "#000000"}))
         for u, v in G.edges():
             if u in displayed_node_ids and v in displayed_node_ids:
                  agraph_edges_tuples.append((u, v)); agraph_edges.append(Edge(source=u, target=v, color="#CCCCCC"))
@@ -909,13 +930,15 @@ elif st.session_state.dtg_graph_data:
         else: st.caption("Orphan analysis not available.")
     st.divider()
 
-    # (Export section remains the same)
+    # (Export section remains the same, but ensures DOT quoting)
     dot_lines = ["digraph G {"]; node_style_map = {n.id: f'[color="{n.color}", fontcolor="#000000"]' for n in agraph_nodes}
     for node_id in sorted(list(displayed_node_ids)):
         style = node_style_map.get(node_id, "")
+        # Ensure node IDs are quoted in DOT if they contain spaces or special chars
         quoted_id = f'"{node_id}"' if re.search(r'\s|[^a-zA-Z0-9_]', node_id) else node_id
         dot_lines.append(f'  {quoted_id} {style};')
     for u, v in sorted(agraph_edges_tuples):
+        # Ensure source and target are quoted in DOT if needed
         quoted_u = f'"{u}"' if re.search(r'\s|[^a-zA-Z0-9_]', u) else u
         quoted_v = f'"{v}"' if re.search(r'\s|[^a-zA-Z0-9_]', v) else v
         dot_lines.append(f'  {quoted_u} -> {quoted_v};')
@@ -936,12 +959,23 @@ elif st.session_state.dtg_graph_data:
             try:
                  df_deps = pd.DataFrame([{"Source Term": u, "Depends On (Target Term)": v} for u, v in agraph_edges_tuples])
                  if st.session_state.dtg_orphans:
-                      orphan_df = pd.DataFrame([{"Source Term": orphan, "Depends On (Target Term)": "(Orphan)"} for orphan in sorted(st.session_state.dtg_orphans) if orphan in displayed_node_ids])
-                      df_deps = pd.concat([df_deps, orphan_df], ignore_index=True)
-                 df_deps = df_deps.sort_values(by=["Source Term", "Depends On (Target Term)"])
-                 csv_output = df_deps.to_csv(index=False).encode('utf-8')
-                 export_cols[3].download_button("📋 Deps (.csv)", csv_output, f"{safe_filename_base}_dependencies.csv", "text/csv", use_container_width=True, help="Exports source->target dependencies for the current filtered view.")
+                      # Only include orphans that are currently visible (match filter)
+                      visible_orphans = [orphan for orphan in st.session_state.dtg_orphans if orphan in displayed_node_ids]
+                      if visible_orphans:
+                          orphan_df = pd.DataFrame([{"Source Term": orphan, "Depends On (Target Term)": "(Orphan)"} for orphan in sorted(visible_orphans)])
+                          df_deps = pd.concat([df_deps, orphan_df], ignore_index=True)
+
+                 if not df_deps.empty:
+                      df_deps = df_deps.sort_values(by=["Source Term", "Depends On (Target Term)"])
+                      csv_output = df_deps.to_csv(index=False).encode('utf-8')
+                      export_cols[3].download_button("📋 Deps (.csv)", csv_output, f"{safe_filename_base}_dependencies.csv", "text/csv", use_container_width=True, help="Exports source->target dependencies for the current filtered view.")
+                 else:
+                      export_cols[3].button("📋 Deps (.csv)", disabled=True, help="No dependencies/orphans to export in current view.", use_container_width=True)
+
             except Exception as e: export_cols[3].warning(f"CSV ERR: {e}", icon="⚠️")
+        else:
+             export_cols[3].button("📋 Deps (.csv)", disabled=True, help="Graph data not available for CSV export.", use_container_width=True)
+
     with st.expander("View Generated DOT Code (for current view)"): st.code(generated_dot_code, language='dot')
 
 
