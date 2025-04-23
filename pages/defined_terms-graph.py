@@ -28,7 +28,7 @@ import google.oauth2.service_account
 from google.api_core.exceptions import NotFound # For GCS blob check
 
 # --- Configuration ---
-MODEL_NAME = "gemini-1.5-pro-preview-0514" # Specific model requested
+MODEL_NAME = "gemini-2.5-pro-preview-03-25" # Specific model requested
 PAGE_TITLE = "Defined Terms Relationship Grapher"
 PAGE_ICON = "🔗"
 DEFAULT_NODE_COLOR = "#ACDBC9" # Light greenish-teal
