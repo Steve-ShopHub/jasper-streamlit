@@ -589,7 +589,7 @@ if st.session_state.dtg_graph_data:
 st.sidebar.markdown("---")
 if st.sidebar.button("📜 View Analysis History", key="view_dtg_history", use_container_width=True):
      try:
-         st.switch_page("defined_terms_graph.py")
+         st.switch_page("pages/defined_terms_graph.py")
      except Exception as e:
           st.sidebar.error(f"Could not navigate to history page: {e}")
 
