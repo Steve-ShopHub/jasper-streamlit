@@ -1,5 +1,5 @@
 # pages/defined_terms_graph.py
-# --- COMPLETE FILE vX.Y+6 (Removed Streaming) ---
+# --- COMPLETE FILE vX.Y+7 (Results JSON in GCS) ---
 
 import streamlit as st
 import google.generativeai as genai
@@ -40,6 +40,7 @@ MAX_UPLOAD_RETRIES = 2
 UPLOAD_RETRY_DELAY = 3 # seconds
 DTG_HISTORY_COLLECTION = "dtg_runs" # Firestore collection for DTG history
 GCS_PDF_FOLDER_DTG = "dtg_pdfs" # Folder within GCS bucket for persistent PDFs
+GCS_JSON_FOLDER_DTG = "dtg_results_json" # Folder within GCS bucket for results JSON
 API_TIMEOUT = 900 # Seconds for Gemini API call
 
 # --- Set Page Config ---
@@ -191,8 +192,11 @@ def parse_ai_response(response_text):
 # Moved outside the function so reset_dtg_state can access keys
 STATE_DEFAULTS = {
     'dtg_pdf_bytes': None, 'dtg_pdf_name': None,
-    'dtg_processing': False, 'dtg_error': None, 'dtg_graph_data': None,
-    'dtg_nx_graph': None, 'dtg_cycles': None, 'dtg_orphans': None,
+    'dtg_processing': False, 'dtg_error': None,
+    'dtg_graph_data': None, # Will be loaded from JSON if viewing history
+    'dtg_nx_graph': None,
+    'dtg_cycles': None, # Will be loaded from JSON if viewing history
+    'dtg_orphans': None, # Will be loaded from JSON if viewing history
     'dtg_filter_term': "", 'dtg_highlight_node': None, 'dtg_layout': 'Physics',
     'dtg_raw_ai_response': None,
     'dtg_load_history_id': None, # Trigger for loading history
@@ -200,6 +204,8 @@ STATE_DEFAULTS = {
     'dtg_history_filename': None, # Filename from history
     'dtg_history_timestamp': None, # Timestamp from history
     'dtg_history_model': None, # Model from history
+    'dtg_history_gcs_pdf_path': None, # Store GCS path when viewing history
+    'dtg_history_gcs_json_path': None, # Store GCS JSON path when viewing history
     # 'api_key': None, # API key handled separately
     'run_key': 0, # Used to ensure unique widget keys on rerun
 }
@@ -218,11 +224,7 @@ def initialize_dtg_state():
 def reset_dtg_state(preserve_api_key=True):
     """Resets session state, optionally preserving API key."""
     current_api_key = st.session_state.get('api_key', None) if preserve_api_key else None
-    # --- CORRECTED LINE: Get keys from the external dictionary ---
     keys_to_reset = list(STATE_DEFAULTS.keys())
-
-    # We handle api_key separately, so remove it from the list if present
-    # (it's not in STATE_DEFAULTS anyway based on the definition above, but safe practice)
     if 'api_key' in keys_to_reset: keys_to_reset.remove('api_key')
 
     print(f"[{time.strftime('%H:%M:%S')}] Resetting state keys: {keys_to_reset}")
@@ -234,7 +236,6 @@ def reset_dtg_state(preserve_api_key=True):
                 print(f"Warning: Could not delete state key '{key}': {e}")
 
     initialize_dtg_state() # Re-initialize with defaults
-    # Restore the preserved API key *after* re-initialization
     st.session_state.api_key = current_api_key
     print(f"[{time.strftime('%H:%M:%S')}] State reset complete. API Key preserved: {preserve_api_key}")
 
@@ -272,49 +273,51 @@ def get_neighbors(G, node_id):
     return set(G.predecessors(node_id)), set(G.successors(node_id))
 
 # --- GCS Helper Functions ---
-def upload_to_gcs(bucket_name, source_bytes, destination_blob_name, status_placeholder=None):
-    """Uploads bytes to GCS bucket for persistent storage."""
-    if status_placeholder: status_placeholder.info(f"☁️ Uploading PDF to GCS for history...")
-    print(f"[{time.strftime('%H:%M:%S')}] Uploading {len(source_bytes)} bytes to gs://{bucket_name}/{destination_blob_name}")
+# MODIFIED upload_to_gcs to accept content_type
+def upload_to_gcs(bucket_name, source_bytes, destination_blob_name, content_type='application/pdf', status_placeholder=None):
+    """Uploads bytes to GCS bucket with specified content type."""
+    file_type_desc = "PDF" if content_type == 'application/pdf' else "JSON results"
+    if status_placeholder: status_placeholder.info(f"☁️ Uploading {file_type_desc} to GCS for history...")
+    print(f"[{time.strftime('%H:%M:%S')}] Uploading {len(source_bytes)} bytes ({content_type}) to gs://{bucket_name}/{destination_blob_name}")
     try:
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(destination_blob_name)
-        # Consider adding retry logic here if needed
-        blob.upload_from_string(source_bytes, content_type='application/pdf', timeout=180) # Increased timeout for potentially large uploads
+        blob.upload_from_string(source_bytes, content_type=content_type, timeout=180) # Increased timeout
         gcs_path = f"gs://{bucket_name}/{destination_blob_name}"
-        print(f"[{time.strftime('%H:%M:%S')}] Successfully uploaded PDF to {gcs_path}")
-        if status_placeholder: status_placeholder.info(f"☁️ PDF saved to {gcs_path}")
+        print(f"[{time.strftime('%H:%M:%S')}] Successfully uploaded {file_type_desc} to {gcs_path}")
+        if status_placeholder: status_placeholder.info(f"☁️ {file_type_desc} saved to {gcs_path}")
         return gcs_path
     except Exception as e:
-        error_msg = f"❌ GCS Upload Failed for {destination_blob_name}: {e}"
+        error_msg = f"❌ GCS Upload Failed for {destination_blob_name} ({content_type}): {e}"
         if status_placeholder: status_placeholder.error(error_msg)
         print(f"[{time.strftime('%H:%M:%S')}] {error_msg}")
         traceback.print_exc()
         raise # Re-raise to indicate saving failed
 
+# download_from_gcs remains the same (it just downloads bytes)
 def download_from_gcs(bucket_name, source_blob_name):
     """Downloads a blob from the bucket. Returns bytes or None."""
-    print(f"[{time.strftime('%H:%M:%S')}] Downloading PDF from gs://{bucket_name}/{source_blob_name}")
+    print(f"[{time.strftime('%H:%M:%S')}] Downloading from gs://{bucket_name}/{source_blob_name}")
     try:
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(source_blob_name)
-        # Add timeout to download
-        pdf_bytes = blob.download_as_bytes(timeout=180)
-        print(f"[{time.strftime('%H:%M:%S')}] Successfully downloaded {len(pdf_bytes)} bytes.")
-        return pdf_bytes
+        download_bytes = blob.download_as_bytes(timeout=180)
+        print(f"[{time.strftime('%H:%M:%S')}] Successfully downloaded {len(download_bytes)} bytes.")
+        return download_bytes
     except NotFound:
-        error_msg = f"❌ Error: PDF not found in GCS at gs://{bucket_name}/{source_blob_name}"
+        error_msg = f"❌ Error: File not found in GCS at gs://{bucket_name}/{source_blob_name}"
         st.error(error_msg)
         print(f"[{time.strftime('%H:%M:%S')}] {error_msg}")
         return None
     except Exception as e:
-        error_msg = f"❌ Failed to download PDF from GCS (gs://{bucket_name}/{source_blob_name}): {e}"
+        error_msg = f"❌ Failed to download from GCS (gs://{bucket_name}/{source_blob_name}): {e}"
         st.error(error_msg)
         print(f"[{time.strftime('%H:%M:%S')}] {error_msg}")
         traceback.print_exc()
         return None
 
 # --- Load History Logic ---
+# Modified to load results from GCS JSON
 if 'dtg_load_history_id' in st.session_state and st.session_state.dtg_load_history_id:
     history_id = st.session_state.pop('dtg_load_history_id') # Get ID and clear trigger
     st.info(f"📜 Loading historical analysis: {history_id}...")
@@ -327,80 +330,120 @@ if 'dtg_load_history_id' in st.session_state and st.session_state.dtg_load_histo
         if doc_snapshot.exists:
             run_data = doc_snapshot.to_dict()
             gcs_pdf_path = run_data.get("gcs_pdf_path")
-            hist_graph_data = run_data.get("graph_data")
+            gcs_json_path = run_data.get("gcs_results_json_path") # Get JSON path
             hist_filename = run_data.get("filename", "N/A")
             hist_timestamp_obj = run_data.get("analysis_timestamp")
-            hist_cycles = run_data.get("cycles", [])
-            hist_orphans = run_data.get("orphans", [])
             hist_model = run_data.get("model_name", "Unknown")
+            # Graph data, cycles, orphans are now loaded from the JSON path
 
             if not gcs_pdf_path:
                  st.error("❌ History record is missing the PDF file path (gcs_pdf_path). Cannot load.")
-            elif not hist_graph_data:
-                 st.error("❌ History record is missing graph data. Cannot load.")
+            elif not gcs_json_path: # Check for JSON path
+                 st.error("❌ History record is missing the results JSON file path (gcs_results_json_path). Cannot load.")
             else:
-                # Determine bucket and blob name from GCS path
+                # Determine bucket and blob name from GCS PDF path
                 hist_bucket_name = GCS_BUCKET_NAME # Default assumption
-                hist_blob_name = None
+                hist_pdf_blob_name = None
                 if gcs_pdf_path.startswith("gs://"):
                     try:
                         path_parts = gcs_pdf_path[5:].split("/", 1)
-                        hist_bucket_name = path_parts[0]
-                        hist_blob_name = path_parts[1]
+                        hist_bucket_name = path_parts[0] # Allow overriding bucket if specified
+                        hist_pdf_blob_name = path_parts[1]
                     except IndexError:
-                         st.error(f"❌ Invalid GCS path format in history record: {gcs_pdf_path}")
-                         hist_graph_data = None # Prevent further processing
+                         st.error(f"❌ Invalid GCS PDF path format: {gcs_pdf_path}")
+                         hist_pdf_blob_name = None # Prevent further processing
                 else:
-                    # If path doesn't start with gs://, assume it's relative to default bucket/folder
-                    # This depends on how you saved it - adjust if necessary
-                    # Example: If path is just "dtg_pdfs/20230101/uuid_file.pdf"
-                    hist_blob_name = gcs_pdf_path
+                     hist_pdf_blob_name = gcs_pdf_path # Assume relative path
 
-                if hist_graph_data and hist_blob_name:
-                    with st.spinner(f"Downloading PDF from gs://{hist_bucket_name}/{hist_blob_name}..."):
-                        pdf_bytes_from_hist = download_from_gcs(hist_bucket_name, hist_blob_name)
+                 # Determine bucket and blob name from GCS JSON path
+                hist_json_blob_name = None
+                if gcs_json_path.startswith("gs://"):
+                    try:
+                        path_parts = gcs_json_path[5:].split("/", 1)
+                        # We assume JSON is in the same bucket as PDF for simplicity here,
+                        # but path could override it if needed.
+                        hist_json_blob_name = path_parts[1]
+                    except IndexError:
+                        st.error(f"❌ Invalid GCS JSON path format: {gcs_json_path}")
+                        hist_json_blob_name = None # Prevent further processing
+                else:
+                     hist_json_blob_name = gcs_json_path # Assume relative path
 
-                    if pdf_bytes_from_hist:
-                        print(f"[{time.strftime('%H:%M:%S')}] PDF downloaded. Populating state from history.")
+                if hist_pdf_blob_name and hist_json_blob_name:
+                    pdf_bytes_from_hist = None
+                    results_data_from_hist = None
+                    json_parse_error = None
+
+                    # Download both PDF and JSON
+                    with st.spinner(f"Downloading PDF & results from GCS..."):
+                        pdf_bytes_from_hist = download_from_gcs(hist_bucket_name, hist_pdf_blob_name)
+                        if pdf_bytes_from_hist:
+                             json_bytes_from_hist = download_from_gcs(hist_bucket_name, hist_json_blob_name)
+                             if json_bytes_from_hist:
+                                 try:
+                                     results_data_from_hist = json.loads(json_bytes_from_hist.decode('utf-8'))
+                                     print(f"[{time.strftime('%H:%M:%S')}] Successfully parsed results JSON from GCS.")
+                                 except json.JSONDecodeError as json_err:
+                                     json_parse_error = f"Failed to parse results JSON from GCS: {json_err}"
+                                     print(f"[{time.strftime('%H:%M:%S')}] {json_parse_error}")
+                                 except Exception as parse_err:
+                                     json_parse_error = f"Error processing results JSON from GCS: {parse_err}"
+                                     print(f"[{time.strftime('%H:%M:%S')}] {json_parse_error}")
+                             else:
+                                 st.error("Failed to download the results JSON associated with this history entry.")
+
+                    if pdf_bytes_from_hist and results_data_from_hist:
+                        print(f"[{time.strftime('%H:%M:%S')}] PDF and results downloaded & parsed. Populating state from history.")
                         # Reset state before loading historical data
                         reset_dtg_state(preserve_api_key=True)
 
-                        # Load historical data into session state
-                        st.session_state.dtg_pdf_bytes = pdf_bytes_from_hist
-                        st.session_state.dtg_pdf_name = hist_filename
-                        st.session_state.dtg_graph_data = hist_graph_data
-                        st.session_state.dtg_cycles = hist_cycles
-                        st.session_state.dtg_orphans = hist_orphans
-                        st.session_state.dtg_viewing_history = True
-                        st.session_state.dtg_history_filename = hist_filename
-                        st.session_state.dtg_history_model = hist_model # Store model used
+                        # Extract data from the loaded JSON
+                        hist_graph_data = results_data_from_hist.get("graph_data")
+                        hist_cycles = results_data_from_hist.get("cycles", [])
+                        hist_orphans = results_data_from_hist.get("orphans", [])
 
-                        # Format timestamp safely
-                        try:
-                             if isinstance(hist_timestamp_obj, datetime):
-                                 # Attempt to display in local timezone
-                                 local_ts = hist_timestamp_obj.astimezone()
-                                 hist_ts_str = local_ts.strftime('%Y-%m-%d %H:%M:%S %Z')
-                             elif isinstance(hist_timestamp_obj, str): # Handle if already string
-                                  hist_ts_str = hist_timestamp_obj
-                             else: hist_ts_str = str(hist_timestamp_obj or "N/A")
-                        except Exception as ts_format_err:
-                             print(f"Warning: Could not format history timestamp: {ts_format_err}")
-                             hist_ts_str = "Invalid Timestamp"
-                        st.session_state.dtg_history_timestamp = hist_ts_str
+                        if not hist_graph_data:
+                             st.error("❌ Downloaded results JSON is missing the required 'graph_data' key.")
+                             # Reset state if critical data is missing after download
+                             reset_dtg_state(preserve_api_key=True)
+                        else:
+                            # Load historical data into session state
+                            st.session_state.dtg_pdf_bytes = pdf_bytes_from_hist
+                            st.session_state.dtg_pdf_name = hist_filename
+                            st.session_state.dtg_graph_data = hist_graph_data
+                            st.session_state.dtg_cycles = hist_cycles
+                            st.session_state.dtg_orphans = hist_orphans
+                            st.session_state.dtg_viewing_history = True
+                            st.session_state.dtg_history_filename = hist_filename
+                            st.session_state.dtg_history_model = hist_model # Store model used
+                            st.session_state.dtg_history_gcs_pdf_path = gcs_pdf_path # Store paths for reference
+                            st.session_state.dtg_history_gcs_json_path = gcs_json_path
 
-                        # Rebuild NetworkX graph from loaded data
-                        st.session_state.dtg_nx_graph = build_networkx_graph(hist_graph_data)
-                        if st.session_state.dtg_nx_graph is None:
-                             st.warning("Could not rebuild graph from historical data.")
+                            # Format timestamp safely
+                            try:
+                                 if isinstance(hist_timestamp_obj, datetime):
+                                     local_ts = hist_timestamp_obj.astimezone()
+                                     hist_ts_str = local_ts.strftime('%Y-%m-%d %H:%M:%S %Z')
+                                 elif isinstance(hist_timestamp_obj, str): hist_ts_str = hist_timestamp_obj
+                                 else: hist_ts_str = str(hist_timestamp_obj or "N/A")
+                            except Exception as ts_format_err:
+                                 print(f"Warning: Could not format history timestamp: {ts_format_err}")
+                                 hist_ts_str = "Invalid Timestamp"
+                            st.session_state.dtg_history_timestamp = hist_ts_str
 
-                        st.success(f"✅ Successfully loaded history for '{hist_filename}' ({hist_ts_str}).")
-                        load_success = True
-                        time.sleep(1) # Give user time to see message
-                        st.rerun() # Rerun to update UI immediately
+                            # Rebuild NetworkX graph from loaded data
+                            st.session_state.dtg_nx_graph = build_networkx_graph(hist_graph_data)
+                            if st.session_state.dtg_nx_graph is None:
+                                 st.warning("Could not rebuild graph from historical data.")
+
+                            st.success(f"✅ Successfully loaded history for '{hist_filename}' ({hist_ts_str}).")
+                            load_success = True
+                            time.sleep(1) # Give user time to see message
+                            st.rerun() # Rerun to update UI immediately
                     else:
-                        # Download failed, error shown by download_from_gcs
-                        st.error("Failed to download the PDF associated with this history entry.")
+                        # Download or parse failed, error shown by download/parse steps
+                        if json_parse_error: st.error(json_parse_error)
+                        elif not pdf_bytes_from_hist: st.error("Failed to download the PDF associated with this history entry.")
                         reset_dtg_state(preserve_api_key=True) # Reset state if load fails mid-way
         else:
             st.error(f"❌ History record with ID '{history_id}' not found in database.")
@@ -446,6 +489,10 @@ if st.session_state.dtg_viewing_history:
             </div>""",
             unsafe_allow_html=True
         )
+        # Optionally display GCS paths for debugging
+        with st.expander("Show GCS Paths (History)", expanded=False):
+             st.caption(f"PDF: `{st.session_state.get('dtg_history_gcs_pdf_path', 'N/A')}`")
+             st.caption(f"Results JSON: `{st.session_state.get('dtg_history_gcs_json_path', 'N/A')}`")
     with banner_cols[1]:
         if st.button("⬅️ Exit History / New", key="exit_history_dtg", use_container_width=True):
             reset_dtg_state(preserve_api_key=True)
@@ -548,36 +595,45 @@ if st.sidebar.button("📜 View Analysis History", key="view_dtg_history", use_c
 
 
 # --- Main Area ---
+# Modified processing block to save results JSON to GCS
 if st.session_state.dtg_processing:
     status_placeholder = st.empty()
-    # No live_response_placeholder needed anymore
     full_response_text = ""
     process_start_time = time.time()
     print(f"[{time.strftime('%H:%M:%S')}] ===== Starting Generation Process =====")
 
-    temp_file_path = None          # Local temp file for Gemini upload
-    uploaded_file_ref = None       # Gemini File API reference (temporary)
+    temp_file_path = None
+    uploaded_file_ref = None
     gemini_file_upload_successful = False
-    persistent_gcs_path = None     # GCS path for history saving
-    firestore_run_id = str(uuid.uuid4()) # Unique ID for this run (used for GCS & Firestore)
-    run_error_message = None       # Store error message for saving to Firestore if run fails
-    current_analysis_timestamp = datetime.now(timezone.utc) # Timestamp for this run
+    persistent_gcs_pdf_path = None # GCS path for PDF history saving
+    persistent_gcs_json_path = None # GCS path for results JSON history saving
+    firestore_run_id = str(uuid.uuid4())
+    run_error_message = None
+    current_analysis_timestamp = datetime.now(timezone.utc)
+    response = None # Initialize response variable
+    current_graph_data = None # Store results temporarily before saving
+    current_cycles = None
+    current_orphans = None
+
 
     # Wrap the entire processing in a try...finally to ensure cleanup
     try:
         with st.spinner(f"⚙️ Analyzing '{st.session_state.dtg_pdf_name}'..."):
+            # ... (API Config, Temp File Creation, Gemini Upload - remain the same) ...
             status_placeholder.info("🔑 Configuring API...")
             print(f"[{time.strftime('%H:%M:%S')}] Configuring GenAI client...")
             try:
                 genai.configure(api_key=st.session_state.api_key)
             except Exception as config_err:
                  run_error_message = f"Failed to configure API key: {config_err}"
+                 print(f"[{time.strftime('%H:%M:%S')}] CONFIG ERROR: {run_error_message}") # Log config error
                  raise ValueError(run_error_message)
 
             pdf_bytes = st.session_state.dtg_pdf_bytes
             pdf_name = st.session_state.dtg_pdf_name
             if not pdf_bytes or not pdf_name:
                 run_error_message = "Cannot proceed without uploaded PDF data."
+                print(f"[{time.strftime('%H:%M:%S')}] PRE-CHECK ERROR: {run_error_message}") # Log pre-check error
                 raise ValueError(run_error_message)
 
             # --- Create Temporary File for Gemini API ---
@@ -592,6 +648,7 @@ if st.session_state.dtg_processing:
                 print(f"[{time.strftime('%H:%M:%S')}] Temporary file saved to: {temp_file_path}")
             except Exception as temp_err:
                 run_error_message = f"Failed to create temporary file: {temp_err}"
+                print(f"[{time.strftime('%H:%M:%S')}] TEMP FILE ERROR: {run_error_message}") # Log temp file error
                 traceback.print_exc()
                 raise # Propagate error
 
@@ -611,6 +668,7 @@ if st.session_state.dtg_processing:
                     err_str = str(upload_err).lower()
                     if "api key" in err_str or "authenticat" in err_str or "permission" in err_str or "quota" in err_str:
                         run_error_message = f"Gemini file upload failed (Permissions/Quota/Key): {upload_err}."
+                        print(f"[{time.strftime('%H:%M:%S')}] GEMINI UPLOAD ERROR (FATAL): {run_error_message}") # Log fatal upload error
                         traceback.print_exc(); raise ValueError(run_error_message)
                     elif attempt < MAX_UPLOAD_RETRIES:
                         print(f"[{time.strftime('%H:%M:%S')}] Retrying Gemini upload in {UPLOAD_RETRY_DELAY}s...")
@@ -618,15 +676,16 @@ if st.session_state.dtg_processing:
                         time.sleep(UPLOAD_RETRY_DELAY)
                     else: # Final attempt failed
                         run_error_message = f"Failed to upload file to Gemini after {MAX_UPLOAD_RETRIES + 1} attempts: {upload_err}"
+                        print(f"[{time.strftime('%H:%M:%S')}] GEMINI UPLOAD ERROR (FINAL): {run_error_message}") # Log final upload error
                         traceback.print_exc(); raise ValueError(run_error_message)
 
             if not gemini_file_upload_successful or not uploaded_file_ref:
                  run_error_message = run_error_message or "Gemini file upload process failed unexpectedly."
+                 print(f"[{time.strftime('%H:%M:%S')}] GEMINI UPLOAD STATE ERROR: {run_error_message}") # Log state error
                  raise ValueError(run_error_message)
 
-            # --- Prompt & API Call ---
+            # --- Prompt & API Call (Non-Streaming) ---
             status_placeholder.info("🧠 Preparing analysis prompt...")
-            # (prompt_instructions definition remains the same as previous version)
             prompt_instructions = f"""
 Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or similar) of the **provided document file**. The goal is to identify all formally defined terms and map the interdependencies *only* between these terms based on their definitions.
 
@@ -656,136 +715,154 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
             print(f"[{time.strftime('%H:%M:%S')}] Sending request to Gemini API with file URI: {uploaded_file_ref.uri}")
             api_call_start_time = time.time()
 
-            # --- NON-STREAMING API CALL ---
-            response = model.generate_content(
-                contents=[uploaded_file_ref, prompt_instructions], # Pass file ref and prompt
-                generation_config=generation_config, safety_settings=safety_settings,
-                request_options={'timeout': API_TIMEOUT},
-                stream=False # <<< Ensure streaming is OFF
-            )
-
-            api_call_end_time = time.time()
-            print(f"[{time.strftime('%H:%M:%S')}] Gemini API call completed. Duration: {api_call_end_time - api_call_start_time:.2f}s.")
+            try:
+                print(f"[{time.strftime('%H:%M:%S')}] Attempting model.generate_content (non-streaming)...")
+                response = model.generate_content(
+                    contents=[uploaded_file_ref, prompt_instructions], # Pass file ref and prompt
+                    generation_config=generation_config, safety_settings=safety_settings,
+                    request_options={'timeout': API_TIMEOUT}, stream=False
+                )
+                api_call_end_time = time.time(); print(f"[{time.strftime('%H:%M:%S')}] Gemini API call completed. Duration: {api_call_end_time - api_call_start_time:.2f}s.")
+                if response is None: raise ValueError("Gemini API call returned None unexpectedly.")
+                print(f"[{time.strftime('%H:%M:%S')}] Response object received: Type={type(response)}")
+            except google.api_core.exceptions.GoogleAPIError as api_err:
+                 api_call_end_time = time.time(); run_error_message = f"Gemini API call failed: {type(api_err).__name__}: {api_err}"; print(f"[{time.strftime('%H:%M:%S')}] GEMINI API ERROR: {run_error_message}"); print(f"[{time.strftime('%H:%M:%S')}] API call duration before error: {api_call_end_time - api_call_start_time:.2f}s."); traceback.print_exc(); raise ValueError(run_error_message) from api_err
+            except Exception as call_err:
+                 api_call_end_time = time.time(); run_error_message = f"Unexpected error during Gemini API call: {type(call_err).__name__}: {call_err}"; print(f"[{time.strftime('%H:%M:%S')}] UNEXPECTED API CALL ERROR: {run_error_message}"); print(f"[{time.strftime('%H:%M:%S')}] API call duration before error: {api_call_end_time - api_call_start_time:.2f}s."); traceback.print_exc(); raise ValueError(run_error_message) from call_err
 
             # --- Process Full Response ---
             status_placeholder.info("📄 Processing Gemini's full response...")
-
+            print(f"[{time.strftime('%H:%M:%S')}] Attempting to access response.text...")
             try:
-                # Access the full text directly from the response object
+                # ... (Debugging print statements for response parts - can be kept or removed) ...
                 full_response_text = response.text
                 st.session_state.dtg_raw_ai_response = full_response_text # Save raw response
-                print(f"[{time.strftime('%H:%M:%S')}] Received full response. Length: {len(full_response_text)} chars.")
-            except ValueError as e:
-                 # Handle potential issues like blocked content (response might lack 'text')
-                 print(f"[{time.strftime('%H:%M:%S')}] Error accessing response text (maybe blocked?): {e}")
-                 # Check response.prompt_feedback for block reasons
-                 block_reason = "Unknown"
-                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
-                     # Attempt to get more specific reason if available
-                     feedback_str = str(response.prompt_feedback)
-                     print(f"[{time.strftime('%H:%M:%S')}] Prompt Feedback: {feedback_str}")
-                     # Simple extraction, might need adjustment based on actual feedback structure
-                     match = re.search(r"reason:\s*([A-Z_]+)", feedback_str, re.IGNORECASE)
-                     if match: block_reason = match.group(1)
-                     else: block_reason = feedback_str[:100] # Fallback to start of feedback
-                 run_error_message = f"Failed to get text from Gemini response. Possible safety block or API issue. Reason: {block_reason}"
-                 raise ValueError(run_error_message) from e
-            except AttributeError:
-                 # Handle cases where 'text' attribute might be missing unexpectedly
-                 print(f"[{time.strftime('%H:%M:%S')}] Response object missing 'text' attribute.")
-                 run_error_message = "Gemini response object structure was unexpected (missing 'text')."
-                 raise ValueError(run_error_message)
-            except Exception as resp_err:
-                 # Catch other potential errors during response access
-                 print(f"[{time.strftime('%H:%M:%S')}] Unexpected error accessing response: {resp_err}")
-                 run_error_message = f"An unexpected error occurred while accessing the Gemini response: {resp_err}"
-                 raise ValueError(run_error_message) from resp_err
-
-
-            if not full_response_text.strip():
-                 run_error_message = "AI returned an empty response."
-                 raise ValueError(run_error_message)
+                print(f"[{time.strftime('%H:%M:%S')}] Successfully accessed response.text. Length: {len(full_response_text)} chars.")
+            except ValueError as e: # Catch safety blocks etc.
+                 # ... (Error handling for accessing response.text remains the same) ...
+                 print(f"[{time.strftime('%H:%M:%S')}] ValueError accessing response.text: {e}")
+                 block_reason = "Unknown"; feedback_str = "N/A"
+                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback: feedback_str = str(response.prompt_feedback); block_reason = feedback_str[:150]
+                 run_error_message = f"Failed to get text from Gemini response (ValueError, likely safety block). Feedback: {block_reason}"; print(f"[{time.strftime('%H:%M:%S')}] RESPONSE TEXT ERROR (ValueError): {run_error_message}"); traceback.print_exc(); raise ValueError(run_error_message) from e
+            except AttributeError as ae: # Catch unexpected response structure
+                 # ... (Error handling for accessing response.text remains the same) ...
+                 print(f"[{time.strftime('%H:%M:%S')}] AttributeError accessing response.text: {ae}"); feedback_info = "N/A"
+                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback: feedback_info = str(response.prompt_feedback)[:150]
+                 run_error_message = f"Gemini response object missing 'text' attribute. Feedback: {feedback_info}"; print(f"[{time.strftime('%H:%M:%S')}] RESPONSE TEXT ERROR (AttributeError): {run_error_message}"); traceback.print_exc(); raise ValueError(run_error_message) from ae
+            except Exception as resp_err: # Catch other errors
+                 # ... (Error handling for accessing response.text remains the same) ...
+                 print(f"[{time.strftime('%H:%M:%S')}] Unexpected error accessing response.text: {type(resp_err).__name__}: {resp_err}")
+                 run_error_message = f"An unexpected error occurred while accessing the Gemini response text: {resp_err}"; print(f"[{time.strftime('%H:%M:%S')}] RESPONSE TEXT ERROR (Exception): {run_error_message}"); traceback.print_exc(); raise ValueError(run_error_message) from resp_err
 
             # --- Response Parsing & Graph Building ---
-            graph_data, error_msg = parse_ai_response(full_response_text)
-            if error_msg:
-                run_error_message = f"Failed to parse AI response: {error_msg}"
-                raise ValueError(run_error_message)
+            if not full_response_text.strip(): run_error_message = "AI returned an empty response."; print(f"[{time.strftime('%H:%M:%S')}] PARSING ERROR: {run_error_message}"); raise ValueError(run_error_message)
 
-            st.session_state.dtg_graph_data = graph_data
+            graph_data, error_msg = parse_ai_response(full_response_text)
+            if error_msg: run_error_message = f"Failed to parse AI response: {error_msg}"; raise ValueError(run_error_message)
+            current_graph_data = graph_data # Store locally first
             st.toast("Term names & links extracted!", icon="📊")
             status_placeholder.info("⚙️ Analyzing graph structure...")
 
             print(f"[{time.strftime('%H:%M:%S')}] Building NetworkX graph...")
             graph_build_start_time = time.time()
-            st.session_state.dtg_nx_graph = build_networkx_graph(graph_data)
+            # Build graph from locally stored data
+            temp_nx_graph = build_networkx_graph(current_graph_data)
             graph_build_end_time = time.time()
 
-            if st.session_state.dtg_nx_graph is None:
-                run_error_message = "Failed to build graph from parsed data."
-                raise ValueError(run_error_message)
-
-            print(f"[{time.strftime('%H:%M:%S')}] Graph built. Nodes: {len(st.session_state.dtg_nx_graph.nodes())}, Edges: {len(st.session_state.dtg_nx_graph.edges())}. Duration: {graph_build_end_time - graph_build_start_time:.2f}s")
+            if temp_nx_graph is None: run_error_message = "Failed to build graph from parsed data."; print(f"[{time.strftime('%H:%M:%S')}] GRAPH BUILD ERROR: {run_error_message}"); raise ValueError(run_error_message)
+            print(f"[{time.strftime('%H:%M:%S')}] Graph built. Nodes: {len(temp_nx_graph.nodes())}, Edges: {len(temp_nx_graph.edges())}. Duration: {graph_build_end_time - graph_build_start_time:.2f}s")
 
             print(f"[{time.strftime('%H:%M:%S')}] Finding cycles & orphans...")
             analysis_start_time = time.time()
-            st.session_state.dtg_cycles = find_cycles(st.session_state.dtg_nx_graph)
-            st.session_state.dtg_orphans = find_orphans(st.session_state.dtg_nx_graph)
+            # Find cycles/orphans from locally built graph
+            current_cycles = find_cycles(temp_nx_graph)
+            current_orphans = find_orphans(temp_nx_graph)
             analysis_end_time = time.time()
-            print(f"[{time.strftime('%H:%M:%S')}] Found {len(st.session_state.dtg_cycles) if st.session_state.dtg_cycles is not None else 'N/A'} cycles.")
-            print(f"[{time.strftime('%H:%M:%S')}] Found {len(st.session_state.dtg_orphans) if st.session_state.dtg_orphans is not None else 'N/A'} orphans.")
+            print(f"[{time.strftime('%H:%M:%S')}] Found {len(current_cycles) if current_cycles is not None else 'N/A'} cycles.")
+            print(f"[{time.strftime('%H:%M:%S')}] Found {len(current_orphans) if current_orphans is not None else 'N/A'} orphans.")
             print(f"[{time.strftime('%H:%M:%S')}] Graph analysis duration: {analysis_end_time - analysis_start_time:.2f}s")
             st.toast("Graph analysis complete.", icon="🔬")
             status_placeholder.info("💾 Saving analysis results to history...")
 
             # --- Upload ORIGINAL PDF to GCS for History ---
-            # Construct persistent GCS path
-            gcs_blob_name = f"{GCS_PDF_FOLDER_DTG}/{current_analysis_timestamp.strftime('%Y%m%d')}/{firestore_run_id}_{safe_original_filename}"
-            persistent_gcs_path = upload_to_gcs(GCS_BUCKET_NAME, pdf_bytes, gcs_blob_name, status_placeholder)
-            if not persistent_gcs_path:
-                 # Error handled within upload_to_gcs, but we stop saving here
-                 st.warning("Proceeding without saving to history due to GCS upload failure.")
-            else:
-                # --- Save successful run to Firestore ---
-                data_to_save = {
+            gcs_pdf_blob_name = f"{GCS_PDF_FOLDER_DTG}/{current_analysis_timestamp.strftime('%Y%m%d')}/{firestore_run_id}_{safe_original_filename}"
+            try:
+                # Pass 'application/pdf' content type explicitly
+                persistent_gcs_pdf_path = upload_to_gcs(GCS_BUCKET_NAME, pdf_bytes, gcs_pdf_blob_name, content_type='application/pdf', status_placeholder=status_placeholder)
+            except Exception as gcs_pdf_upload_err:
+                 print(f"[{time.strftime('%H:%M:%S')}] GCS PDF UPLOAD FAILED: {gcs_pdf_upload_err}")
+                 st.warning(f"☁️ GCS PDF Upload Failed: {gcs_pdf_upload_err}. Cannot save history.", icon="⚠️")
+                 run_error_message = f"GCS PDF Upload Failed: {gcs_pdf_upload_err}" # Record error
+                 raise # Stop processing as history save depends on PDF upload
+
+            # --- Upload RESULTS JSON to GCS for History ---
+            if persistent_gcs_pdf_path: # Only proceed if PDF upload succeeded
+                gcs_json_blob_name = f"{GCS_JSON_FOLDER_DTG}/{current_analysis_timestamp.strftime('%Y%m%d')}/{firestore_run_id}_results.json"
+                results_data_to_save = {
+                    "graph_data": current_graph_data,
+                    "cycles": current_cycles if current_cycles is not None else [],
+                    "orphans": current_orphans if current_orphans is not None else []
+                }
+                try:
+                    results_json_bytes = json.dumps(results_data_to_save, indent=2).encode('utf-8')
+                    # Pass 'application/json' content type
+                    persistent_gcs_json_path = upload_to_gcs(GCS_BUCKET_NAME, results_json_bytes, gcs_json_blob_name, content_type='application/json', status_placeholder=status_placeholder)
+                except Exception as gcs_json_upload_err:
+                    print(f"[{time.strftime('%H:%M:%S')}] GCS JSON UPLOAD FAILED: {gcs_json_upload_err}")
+                    st.error(f"❌ Failed to upload results JSON to GCS: {gcs_json_upload_err}. History save failed.")
+                    run_error_message = f"GCS JSON Upload Failed: {gcs_json_upload_err}" # Record error
+                    # Don't raise here, allow cleanup, but Firestore save will be skipped
+
+            # --- Save run metadata to Firestore ---
+            if persistent_gcs_pdf_path and persistent_gcs_json_path:
+                data_to_save_firestore = {
                     "filename": pdf_name,
                     "analysis_timestamp": current_analysis_timestamp, # Use UTC timestamp object
-                    "gcs_pdf_path": persistent_gcs_path,
-                    "graph_data": st.session_state.dtg_graph_data, # The dict with terms/edges
-                    "cycles": st.session_state.dtg_cycles if st.session_state.dtg_cycles is not None else [],
-                    "orphans": st.session_state.dtg_orphans if st.session_state.dtg_orphans is not None else [],
+                    "gcs_pdf_path": persistent_gcs_pdf_path,
+                    "gcs_results_json_path": persistent_gcs_json_path, # Store path to JSON
+                    # DO NOT store large graph_data, cycles, orphans here anymore
                     "model_name": MODEL_NAME,
                     "error_message": None # Explicitly null for success
                 }
                 try:
-                    db.collection(DTG_HISTORY_COLLECTION).document(firestore_run_id).set(data_to_save)
-                    print(f"[{time.strftime('%H:%M:%S')}] Successfully saved run {firestore_run_id} to Firestore.")
+                    db.collection(DTG_HISTORY_COLLECTION).document(firestore_run_id).set(data_to_save_firestore)
+                    print(f"[{time.strftime('%H:%M:%S')}] Successfully saved run metadata {firestore_run_id} to Firestore.")
                     status_placeholder.success("✅ Analysis complete and saved to history!")
                     st.toast("💾 Analysis saved to history.", icon="✅")
-                except Exception as db_err:
-                    st.error(f"❌ Failed to save results to Firestore database: {db_err}")
-                    print(f"[{time.strftime('%H:%M:%S')}] Firestore save error: {db_err}")
-                    traceback.print_exc()
-                    # Don't set dtg_error here, as analysis itself succeeded
+                    # Analysis succeeded, populate session state for immediate display
+                    st.session_state.dtg_graph_data = current_graph_data
+                    st.session_state.dtg_cycles = current_cycles
+                    st.session_state.dtg_orphans = current_orphans
+                    st.session_state.dtg_nx_graph = temp_nx_graph
 
-    # --- Exception Handling ---
+                except Exception as db_err:
+                    st.error(f"❌ Failed to save results metadata to Firestore: {db_err}")
+                    print(f"[{time.strftime('%H:%M:%S')}] FIRESTORE SAVE ERROR: {db_err}")
+                    traceback.print_exc()
+                    run_error_message = f"Firestore Save Error: {db_err}" # Record error
+                    # Don't set dtg_error here, as analysis itself succeeded, but saving failed
+
+            elif run_error_message is None: # If JSON upload failed but analysis was otherwise ok
+                 status_placeholder.warning("✅ Analysis complete, but not saved to history due to results JSON upload error.")
+
+
+    # --- Exception Handling (Outer Block) ---
     except (ValueError, types.StopCandidateException, google.api_core.exceptions.GoogleAPIError) as e:
-        # Handle specific errors caught and raised within the try block or API errors
-        # Error message should already be in run_error_message or generated here
+        # Handles errors raised explicitly or caught API errors
         if not run_error_message: run_error_message = f"Analysis Error: {type(e).__name__}: {e}"
-        st.session_state.dtg_error = run_error_message # Set session state error for display
-        print(f"[{time.strftime('%H:%M:%S')}] Analysis failed: {run_error_message}")
-        if not isinstance(e, ValueError): traceback.print_exc() # Print traceback for non-ValueErrors
-        # Attempt to save failure record to Firestore
+        st.session_state.dtg_error = run_error_message
+        print(f"[{time.strftime('%H:%M:%S')}] ANALYSIS FAILED (Outer Except Block 1): {run_error_message}")
+        if not isinstance(e, ValueError): traceback.print_exc()
+        # Attempt to save failure record (without large data)
         try:
-            status_placeholder.warning("💾 Saving error details to history...") # Use warning for errors
+            status_placeholder.warning("💾 Saving error details to history...")
             error_data = {
                 "filename": st.session_state.get('dtg_pdf_name', 'Unknown'),
                 "analysis_timestamp": current_analysis_timestamp,
-                "gcs_pdf_path": None, # No persistent GCS path on failure usually
-                "graph_data": None, "cycles": None, "orphans": None,
+                "gcs_pdf_path": persistent_gcs_pdf_path, # Save PDF path if it was uploaded
+                "gcs_results_json_path": None, # No JSON path on failure
                 "model_name": MODEL_NAME,
-                "error_message": run_error_message[:1000] # Limit error message length
+                "error_message": run_error_message[:1000]
             }
             db.collection(DTG_HISTORY_COLLECTION).document(firestore_run_id).set(error_data)
             print(f"[{time.strftime('%H:%M:%S')}] Saved error record {firestore_run_id} to Firestore.")
@@ -796,14 +873,20 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
 
     except Exception as e:
         # Catch any other unexpected errors
-        run_error_message = f"An unexpected critical error occurred: {e}"
+        if not run_error_message: run_error_message = f"An unexpected critical error occurred: {type(e).__name__}: {e}"
         st.session_state.dtg_error = run_error_message
-        print(f"[{time.strftime('%H:%M:%S')}] Unexpected critical error: {run_error_message}")
+        print(f"[{time.strftime('%H:%M:%S')}] UNEXPECTED CRITICAL ERROR (Outer Except Block 2): {run_error_message}")
         traceback.print_exc()
-        # Attempt to save failure record (similar to above)
+        # Attempt to save failure record
         try:
-            status_placeholder.warning("💾 Saving error details to history...") # Use warning for errors
-            error_data = {"filename": st.session_state.get('dtg_pdf_name', 'Unknown'), "analysis_timestamp": current_analysis_timestamp, "gcs_pdf_path": None, "graph_data": None, "cycles": None, "orphans": None, "model_name": MODEL_NAME, "error_message": run_error_message[:1000]}
+            status_placeholder.warning("💾 Saving error details to history...")
+            error_data = {
+                "filename": st.session_state.get('dtg_pdf_name', 'Unknown'),
+                "analysis_timestamp": current_analysis_timestamp,
+                "gcs_pdf_path": persistent_gcs_pdf_path, # Save PDF path if available
+                "gcs_results_json_path": None,
+                "model_name": MODEL_NAME, "error_message": run_error_message[:1000]
+            }
             db.collection(DTG_HISTORY_COLLECTION).document(firestore_run_id).set(error_data)
             print(f"[{time.strftime('%H:%M:%S')}] Saved error record {firestore_run_id} to Firestore.")
             st.toast("💾 Error details saved to history.", icon="💾")
@@ -814,59 +897,57 @@ Your task is to analyze ONLY the 'Definitions' section (typically Section 1 or s
     # --- Cleanup Phase ---
     finally:
         print(f"[{time.strftime('%H:%M:%S')}] Entering cleanup phase...")
-        # Clear placeholders only after potential saving messages
-        status_placeholder.info("🧹 Cleaning up temporary resources...")
-        # No live_response_placeholder to clear
+        # Display final status message before clearing placeholder
+        final_save_failed = (persistent_gcs_pdf_path and not persistent_gcs_json_path) or (run_error_message and "save" in run_error_message.lower())
+        if st.session_state.dtg_error:
+             status_placeholder.error(f"❌ Failed: {st.session_state.dtg_error}")
+        elif final_save_failed:
+             status_placeholder.warning("✅ Analysis complete, but failed to save results to cloud history.")
+        elif st.session_state.dtg_graph_data: # Check if graph data was populated (indicates success)
+             status_placeholder.success("✅ Analysis complete and saved to history!") # Reiterate success if needed
+        # else: No explicit message if processing failed very early
 
-        # 1. Delete Temporary Google Cloud File (used for generation)
+        print(f"[{time.strftime('%H:%M:%S')}] Cleaning up temporary resources...")
+        # ... (Cleanup logic for Gemini temp file and local temp file remains the same) ...
         if uploaded_file_ref and hasattr(uploaded_file_ref, 'name'):
             try:
                 print(f"[{time.strftime('%H:%M:%S')}] Deleting temporary cloud file: {uploaded_file_ref.name}...")
                 delete_start = time.time(); genai.delete_file(name=uploaded_file_ref.name); delete_end = time.time()
                 print(f"[{time.strftime('%H:%M:%S')}] Temp cloud file deleted. Duration: {delete_end - delete_start:.2f}s")
-                # Don't toast success here, it might overwrite final status message
             except Exception as delete_err:
                 print(f"[{time.strftime('%H:%M:%S')}] WARNING: Failed to delete temp cloud file '{uploaded_file_ref.name}': {delete_err}")
                 st.sidebar.warning(f"Temp cloud cleanup issue: {delete_err}", icon="⚠️")
-        elif gemini_file_upload_successful:
-             print(f"[{time.strftime('%H:%M:%S')}] WARNING: Temp cloud file reference lost before cleanup.")
-             st.sidebar.warning("Could not auto-delete temp cloud file (ref lost).", icon="⚠️")
-        else:
-            print(f"[{time.strftime('%H:%M:%S')}] Skipping temp cloud file deletion.")
+        elif gemini_file_upload_successful: print(f"[{time.strftime('%H:%M:%S')}] WARNING: Temp cloud file reference available but might not have been deleted.")
+        else: print(f"[{time.strftime('%H:%M:%S')}] Skipping temp cloud file deletion (was not uploaded successfully).")
 
-        # 2. Delete Local Temporary File
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 print(f"[{time.strftime('%H:%M:%S')}] Deleting local temporary file: {temp_file_path}...")
                 os.remove(temp_file_path); print(f"[{time.strftime('%H:%M:%S')}] Local temp file deleted.")
-            except Exception as local_delete_err:
-                print(f"[{time.strftime('%H:%M:%S')}] WARNING: Failed to delete local temp file '{temp_file_path}': {local_delete_err}")
-        else:
-            print(f"[{time.strftime('%H:%M:%S')}] Skipping local temp file deletion.")
+            except Exception as local_delete_err: print(f"[{time.strftime('%H:%M:%S')}] WARNING: Failed to delete local temp file '{temp_file_path}': {local_delete_err}")
+        else: print(f"[{time.strftime('%H:%M:%S')}] Skipping local temp file deletion (path: {temp_file_path}).")
 
-        # Ensure raw response is saved even if error happens late
-        if full_response_text and not st.session_state.dtg_raw_ai_response:
-             st.session_state.dtg_raw_ai_response = full_response_text
+        if full_response_text and not st.session_state.dtg_raw_ai_response: st.session_state.dtg_raw_ai_response = full_response_text
 
         st.session_state.dtg_processing = False
-        status_placeholder.empty() # Clear the status message area
         process_end_time = time.time()
         print(f"[{time.strftime('%H:%M:%S')}] ===== Generation Process Ended =====")
         print(f"[{time.strftime('%H:%M:%S')}] Total processing duration (incl. save/cleanup): {process_end_time - process_start_time:.2f} seconds.")
-        print(f"[{time.strftime('%H:%M:%S')}] Triggering rerun.")
-        # Short delay allows final messages/toasts to be seen before rerun clears them
-        time.sleep(1.5 if st.session_state.dtg_error else 0.5)
+        print(f"[{time.strftime('%H:%M:%S')}] Triggering rerun after final status display.")
+        time.sleep(2.0 if st.session_state.dtg_error or final_save_failed else 1.0)
+        status_placeholder.empty() # Clear status *before* rerun
         st.rerun()
 
+# --- Display Results Area (No changes needed here) ---
+# This part works correctly whether the data was generated live or loaded from history (via GCS JSON)
 elif st.session_state.dtg_graph_data:
-    # --- Display Results (Works for both live run and loaded history) ---
+    # ... (Graph display logic remains exactly the same as previous version) ...
     display_name = st.session_state.dtg_history_filename if st.session_state.dtg_viewing_history else st.session_state.dtg_pdf_name
     st.subheader(f"📊 Interactive Graph & Analysis for '{display_name}'")
     G = st.session_state.dtg_nx_graph
     filter_term = st.session_state.dtg_filter_term
     highlight_node = st.session_state.dtg_highlight_node
 
-    # (Graph filtering, node/edge preparation logic remains the same)
     nodes_to_display_names = set(G.nodes()) if G else set()
     if filter_term:
         try: filter_regex = re.compile(filter_term, re.IGNORECASE); nodes_to_display_names = {n for n in G.nodes() if filter_regex.search(n)}
@@ -883,21 +964,18 @@ elif st.session_state.dtg_graph_data:
             displayed_node_ids.add(node_id); node_color = DEFAULT_NODE_COLOR; node_size = 15
             if node_id == highlight_node: node_color = HIGHLIGHT_COLOR; node_size = 25
             elif node_id in highlight_neighbors_predecessors or node_id in highlight_neighbors_successors: node_color = NEIGHBOR_COLOR; node_size = 20
-            # Ensure label is correctly quoted if it contains special characters for agraph ID
             safe_node_id_label = node_id # Use original name for label
             agraph_nodes.append(Node(id=node_id, label=safe_node_id_label, color=node_color, size=node_size, font={'color': "#000000"}))
         for u, v in G.edges():
             if u in displayed_node_ids and v in displayed_node_ids:
                  agraph_edges_tuples.append((u, v)); agraph_edges.append(Edge(source=u, target=v, color="#CCCCCC"))
 
-    # (Agraph config remains the same)
     is_physics = st.session_state.dtg_layout == 'Physics'
     config = Config(width='100%', height=700, directed=True, physics=is_physics, hierarchical=not is_physics, highlightColor=HIGHLIGHT_COLOR, collapsible=False, node={'labelProperty':'label', 'size': 15},
         physics_config={'barnesHut': {'gravitationalConstant': -12000, 'centralGravity': 0.15, 'springLength': 200, 'springConstant': 0.06, 'damping': 0.1, 'avoidOverlap': 0.15}, 'minVelocity': 0.75} if is_physics else {},
         layout={'hierarchical': {'enabled': (not is_physics), 'sortMethod': 'directed', 'levelSeparation': 180, 'nodeSpacing': 150}} if not is_physics else {},
         interaction={'navigationButtons': True, 'keyboard': True, 'tooltipDelay': 300, 'hover': True})
 
-    # (Graph display area layout remains the same)
     graph_col, info_col = st.columns([3, 1])
     with graph_col:
         st.caption("Graph View: Click/drag to pan, scroll/pinch to zoom. Select node in sidebar to highlight.")
@@ -914,7 +992,6 @@ elif st.session_state.dtg_graph_data:
         else: st.info("_Select node in sidebar_")
         st.caption("_Full definition text is not extracted._")
         st.markdown("---"); st.markdown("**Graph Analysis:**")
-        # Display cycles and orphans using the data loaded into session state
         if st.session_state.dtg_cycles is not None:
              if st.session_state.dtg_cycles:
                   with st.expander(f"🚨 {len(st.session_state.dtg_cycles)} Circular Definition(s)", expanded=False):
@@ -930,21 +1007,17 @@ elif st.session_state.dtg_graph_data:
         else: st.caption("Orphan analysis not available.")
     st.divider()
 
-    # (Export section remains the same, but ensures DOT quoting)
+    # (Export section remains the same)
     dot_lines = ["digraph G {"]; node_style_map = {n.id: f'[color="{n.color}", fontcolor="#000000"]' for n in agraph_nodes}
     for node_id in sorted(list(displayed_node_ids)):
-        style = node_style_map.get(node_id, "")
-        # Ensure node IDs are quoted in DOT if they contain spaces or special chars
-        quoted_id = f'"{node_id}"' if re.search(r'\s|[^a-zA-Z0-9_]', node_id) else node_id
+        style = node_style_map.get(node_id, ""); quoted_id = f'"{node_id}"' if re.search(r'\s|[^a-zA-Z0-9_]', node_id) else node_id
         dot_lines.append(f'  {quoted_id} {style};')
     for u, v in sorted(agraph_edges_tuples):
-        # Ensure source and target are quoted in DOT if needed
-        quoted_u = f'"{u}"' if re.search(r'\s|[^a-zA-Z0-9_]', u) else u
-        quoted_v = f'"{v}"' if re.search(r'\s|[^a-zA-Z0-9_]', v) else v
+        quoted_u = f'"{u}"' if re.search(r'\s|[^a-zA-Z0-9_]', u) else u; quoted_v = f'"{v}"' if re.search(r'\s|[^a-zA-Z0-9_]', v) else v
         dot_lines.append(f'  {quoted_u} -> {quoted_v};')
     dot_lines.append("}")
     generated_dot_code = "\n".join(dot_lines)
-    st.subheader("Export Graph"); export_cols = st.columns(4); safe_filename_base = re.sub(r'[^\w\-]+', '_', display_name or "graph") # Use display_name
+    st.subheader("Export Graph"); export_cols = st.columns(4); safe_filename_base = re.sub(r'[^\w\-]+', '_', display_name or "graph")
     with export_cols[0]: export_cols[0].download_button("📥 DOT (.dot)", generated_dot_code, f"{safe_filename_base}_graph.dot", "text/vnd.graphviz", use_container_width=True)
     with export_cols[1]:
          try: png_bytes = graphviz.Source(generated_dot_code, format='png').pipe(); export_cols[1].download_button("🖼️ PNG (.png)", png_bytes, f"{safe_filename_base}_graph.png", "image/png", use_container_width=True)
@@ -959,29 +1032,20 @@ elif st.session_state.dtg_graph_data:
             try:
                  df_deps = pd.DataFrame([{"Source Term": u, "Depends On (Target Term)": v} for u, v in agraph_edges_tuples])
                  if st.session_state.dtg_orphans:
-                      # Only include orphans that are currently visible (match filter)
                       visible_orphans = [orphan for orphan in st.session_state.dtg_orphans if orphan in displayed_node_ids]
-                      if visible_orphans:
-                          orphan_df = pd.DataFrame([{"Source Term": orphan, "Depends On (Target Term)": "(Orphan)"} for orphan in sorted(visible_orphans)])
-                          df_deps = pd.concat([df_deps, orphan_df], ignore_index=True)
-
+                      if visible_orphans: orphan_df = pd.DataFrame([{"Source Term": orphan, "Depends On (Target Term)": "(Orphan)"} for orphan in sorted(visible_orphans)]); df_deps = pd.concat([df_deps, orphan_df], ignore_index=True)
                  if not df_deps.empty:
-                      df_deps = df_deps.sort_values(by=["Source Term", "Depends On (Target Term)"])
-                      csv_output = df_deps.to_csv(index=False).encode('utf-8')
+                      df_deps = df_deps.sort_values(by=["Source Term", "Depends On (Target Term)"]); csv_output = df_deps.to_csv(index=False).encode('utf-8')
                       export_cols[3].download_button("📋 Deps (.csv)", csv_output, f"{safe_filename_base}_dependencies.csv", "text/csv", use_container_width=True, help="Exports source->target dependencies for the current filtered view.")
-                 else:
-                      export_cols[3].button("📋 Deps (.csv)", disabled=True, help="No dependencies/orphans to export in current view.", use_container_width=True)
-
+                 else: export_cols[3].button("📋 Deps (.csv)", disabled=True, help="No dependencies/orphans to export in current view.", use_container_width=True)
             except Exception as e: export_cols[3].warning(f"CSV ERR: {e}", icon="⚠️")
-        else:
-             export_cols[3].button("📋 Deps (.csv)", disabled=True, help="Graph data not available for CSV export.", use_container_width=True)
-
+        else: export_cols[3].button("📋 Deps (.csv)", disabled=True, help="Graph data not available for CSV export.", use_container_width=True)
     with st.expander("View Generated DOT Code (for current view)"): st.code(generated_dot_code, language='dot')
 
 
+# --- Error Display / Initial State Messages ---
 elif st.session_state.dtg_error:
-    # --- Error Display ---
-    st.error(f"❌ Failed: {st.session_state.dtg_error}")
+    # Error is displayed by the finally block, but this remains as a fallback
     if st.session_state.dtg_raw_ai_response:
         with st.expander("View Full Raw AI Response (for debugging)", expanded=False):
              st.text_area("Raw Response", st.session_state.dtg_raw_ai_response, height=400, disabled=True, label_visibility="collapsed")
@@ -992,7 +1056,6 @@ elif not st.session_state.dtg_pdf_bytes and not st.session_state.dtg_viewing_his
 elif not st.session_state.dtg_processing and not st.session_state.dtg_viewing_history:
     # --- Ready State Message ---
     st.info("⬆️ Ready to generate. Click the 'Generate & Analyze Graph' button in the sidebar.")
-# No specific message needed if just viewing history and graph isn't displayed yet (should be covered by graph display logic)
 
 
 # Footer
