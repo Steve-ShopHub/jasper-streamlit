@@ -182,39 +182,56 @@ def parse_ai_response(response_text):
     except Exception as e:
         parsing_end_time = time.time(); error_msg = f"Error parsing AI response structure: {e}"; print(f"[{time.strftime('%H:%M:%S')}] Parsing failed (Exception). Duration: {parsing_end_time - parsing_start_time:.2f}s. Error: {error_msg}"); traceback.print_exc(); return None, error_msg
 
+# --- Define Default State Structure ---
+# Moved outside the function so reset_dtg_state can access keys
+STATE_DEFAULTS = {
+    'dtg_pdf_bytes': None, 'dtg_pdf_name': None,
+    'dtg_processing': False, 'dtg_error': None, 'dtg_graph_data': None,
+    'dtg_nx_graph': None, 'dtg_cycles': None, 'dtg_orphans': None,
+    'dtg_filter_term': "", 'dtg_highlight_node': None, 'dtg_layout': 'Physics',
+    'dtg_raw_ai_response': None,
+    'dtg_load_history_id': None, # Trigger for loading history
+    'dtg_viewing_history': False, # Flag for history mode
+    'dtg_history_filename': None, # Filename from history
+    'dtg_history_timestamp': None, # Timestamp from history
+    'dtg_history_model': None, # Model from history
+    # 'api_key': None, # API key handled separately
+    'run_key': 0, # Used to ensure unique widget keys on rerun
+}
+
 # --- Initialize Session State ---
 def initialize_dtg_state():
     """Initializes session state variables if they don't exist."""
-    state_defaults = {
-        'dtg_pdf_bytes': None, 'dtg_pdf_name': None,
-        'dtg_processing': False, 'dtg_error': None, 'dtg_graph_data': None,
-        'dtg_nx_graph': None, 'dtg_cycles': None, 'dtg_orphans': None,
-        'dtg_filter_term': "", 'dtg_highlight_node': None, 'dtg_layout': 'Physics',
-        'dtg_raw_ai_response': None,
-        'dtg_load_history_id': None, # Trigger for loading history
-        'dtg_viewing_history': False, # Flag for history mode
-        'dtg_history_filename': None, # Filename from history
-        'dtg_history_timestamp': None, # Timestamp from history
-        'api_key': None, # Keep API key separate
-        'run_key': 0, # Used to ensure unique widget keys on rerun
-    }
     current_api_key = st.session_state.get('api_key', None) # Preserve API key
-    for key, default_value in state_defaults.items():
+    for key, default_value in STATE_DEFAULTS.items():
         if key not in st.session_state:
             st.session_state[key] = copy.deepcopy(default_value) if isinstance(default_value, (dict, list, set, defaultdict)) else default_value
-    st.session_state.api_key = current_api_key # Restore API key
+    # Ensure API key exists, even if None initially
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = current_api_key
 
 def reset_dtg_state(preserve_api_key=True):
     """Resets session state, optionally preserving API key."""
     current_api_key = st.session_state.get('api_key', None) if preserve_api_key else None
-    keys_to_reset = list(initialize_dtg_state.__defaults__[0].keys()) # Get keys from defaults dict
+    # --- CORRECTED LINE: Get keys from the external dictionary ---
+    keys_to_reset = list(STATE_DEFAULTS.keys())
+
+    # We handle api_key separately, so remove it from the list if present
+    # (it's not in STATE_DEFAULTS anyway based on the definition above, but safe practice)
     if 'api_key' in keys_to_reset: keys_to_reset.remove('api_key')
 
+    print(f"[{time.strftime('%H:%M:%S')}] Resetting state keys: {keys_to_reset}")
     for key in keys_to_reset:
         if key in st.session_state:
-            del st.session_state[key]
+            try:
+                del st.session_state[key]
+            except Exception as e:
+                print(f"Warning: Could not delete state key '{key}': {e}")
+
     initialize_dtg_state() # Re-initialize with defaults
-    st.session_state.api_key = current_api_key # Restore preserved key
+    # Restore the preserved API key *after* re-initialization
+    st.session_state.api_key = current_api_key
+    print(f"[{time.strftime('%H:%M:%S')}] State reset complete. API Key preserved: {preserve_api_key}")
 
 # --- Initial call to ensure state exists ---
 initialize_dtg_state()
